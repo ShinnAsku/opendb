@@ -1,0 +1,37 @@
+[package]
+name = "opendb"
+version = "0.1.0"
+description = "openDB - A lightweight database management tool with AI assistance"
+authors = ["openDB"]
+license = "MIT"
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "opendb_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "sqlite"] }
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+async-trait = "0.1"
+tokio-gaussdb = "0.1.0"
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+reqwest = { version = "0.12", features = ["json"] }
+tiberius = { version = "0.12", features = ["chrono"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+futures = "0.3"
