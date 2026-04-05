@@ -1,12 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ConnectionConfig, QueryResult, PagedQueryResult, ExecuteResult, TableInfo, ColumnInfo, ConnectionHealth } from "@/types";
 import { getPassword } from "./secure-storage";
+import { isMockMode, mockInvoke } from "./tauri-commands-mock";
 
 // Check if we're running in Tauri environment
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 // Wrapper for invoke that checks Tauri environment first
 async function safeInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (isMockMode()) {
+    return mockInvoke<T>(cmd, args);
+  }
   if (!isTauri) {
     throw new Error("This app must be run in a Tauri environment. Please use the desktop app instead of the browser.");
   }

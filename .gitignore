@@ -25,6 +25,16 @@ Thumbs.db
 *.log
 npm-debug.log*
 pnpm-debug.log*
+bun-debug.log*
 
 # Lock (optional, keep pnpm-lock.yaml for reproducibility)
 # pnpm-lock.yaml
+bun.lockb
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Temporary files
+*.tmp
+*.temp
