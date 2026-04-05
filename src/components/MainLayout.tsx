@@ -5,7 +5,7 @@ import type { Connection } from "@/types";
 import { t } from "@/lib/i18n";
 import Toolbar from "./Toolbar";
 import Sidebar from "./Sidebar";
-import NavicatMainPanel from "./NavicatMainPanel";
+import OpenDbMainPanel from "./OpenDbMainPanel";
 import TabBar from "./TabBar";
 import EditorPanel from "./EditorPanel";
 import AIPanel from "./AIPanel";
@@ -249,7 +249,7 @@ function MainLayout() {
         <Panel>
           <ErrorBoundary>
           {activeConnection ? (
-            <NavicatMainPanel activeConnection={activeConnection} selectedSchemaName={selectedSchemaName} />
+            <OpenDbMainPanel activeConnection={activeConnection} selectedSchemaName={selectedSchemaName} />
           ) : (
             <div className="flex flex-col h-full">
               <TabBar />

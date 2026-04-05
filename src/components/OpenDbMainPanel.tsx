@@ -35,7 +35,7 @@ import { exportToCSV, exportToJSON, exportToSQL, downloadFile, importFromCSV, im
 import EditorPanel from "./EditorPanel";
 import PaginationBar from "./PaginationBar";
 
-interface NavicatMainPanelProps {
+interface OpenDbMainPanelProps {
   activeConnection: Connection | null;
   selectedSchemaName?: string;
 }
@@ -49,7 +49,7 @@ interface OpenTab {
   connectionId: string;
 }
 
-function NavicatMainPanel({ activeConnection, selectedSchemaName: propsSelectedSchemaName }: NavicatMainPanelProps) {
+function OpenDbMainPanel({ activeConnection, selectedSchemaName: propsSelectedSchemaName }: OpenDbMainPanelProps) {
   const {
     selectedSchemaName,
     selectedTable,
@@ -123,7 +123,7 @@ function NavicatMainPanel({ activeConnection, selectedSchemaName: propsSelectedS
       return;
     }
     const connId = activeConnection.id;
-    console.log('[NavicatMainPanel] Loading tables for connection:', connId);
+    console.log('[OpenDbMainPanel] Loading tables for connection:', connId);
     getTables(connId).then((result) => {
       const metaMap: Record<string, TableInfo> = {};
       const tableNodes: SchemaNode[] = result
@@ -140,9 +140,9 @@ function NavicatMainPanel({ activeConnection, selectedSchemaName: propsSelectedS
         });
       setLoadedTables(tableNodes);
       setTableMetadataMap(metaMap);
-      console.log('[NavicatMainPanel] Loaded', tableNodes.length, 'tables with metadata');
+      console.log('[OpenDbMainPanel] Loaded', tableNodes.length, 'tables with metadata');
     }).catch((err) => {
-      console.error('[NavicatMainPanel] Failed to load tables:', err);
+      console.error('[OpenDbMainPanel] Failed to load tables:', err);
       setLoadedTables([]);
       setTableMetadataMap({});
     });
@@ -200,7 +200,7 @@ function NavicatMainPanel({ activeConnection, selectedSchemaName: propsSelectedS
     const pgState = paginationState[table.id];
     const effectivePage = page ?? pgState?.currentPage ?? 1;
     const effectivePageSize = pageSizeOverride ?? pgState?.pageSize ?? 1000;
-    console.log('[NavicatMainPanel] loadTableData:', table.name, 'schema:', resolvedSchema, 'page:', effectivePage, 'pageSize:', effectivePageSize);
+    console.log('[OpenDbMainPanel] loadTableData:', table.name, 'schema:', resolvedSchema, 'page:', effectivePage, 'pageSize:', effectivePageSize);
 
     setLoading(true);
     try {
@@ -226,7 +226,7 @@ function NavicatMainPanel({ activeConnection, selectedSchemaName: propsSelectedS
         try {
           ddl = await exportTableSql(connId, table.name, resolvedSchema);
         } catch (ddlErr) {
-          console.error("[NavicatMainPanel] Failed to load table DDL:", ddlErr);
+          console.error("[OpenDbMainPanel] Failed to load table DDL:", ddlErr);
         }
       }
       
@@ -249,7 +249,7 @@ function NavicatMainPanel({ activeConnection, selectedSchemaName: propsSelectedS
         setTableColumnInfoMap(prev => ({ ...prev, [table.id]: cols }));
       } catch { /* ignore */ }
     } catch (err) {
-      console.error("[NavicatMainPanel] Failed to load table data:", err);
+      console.error("[OpenDbMainPanel] Failed to load table data:", err);
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(errorMessage);
     } finally {
@@ -629,7 +629,7 @@ function NavicatMainPanel({ activeConnection, selectedSchemaName: propsSelectedS
       const tableKey = `${selectedTable.schema}.${selectedTable.name}`;
       if (prevSelectedTableRef.current !== tableKey) {
         prevSelectedTableRef.current = tableKey;
-        console.log('[NavicatMainPanel] selectedTable changed:', tableKey);
+        console.log('[OpenDbMainPanel] selectedTable changed:', tableKey);
         const tableNode: SchemaNode = {
           id: selectedTableId || `table-${selectedTable.name}`,
           name: selectedTable.name,
@@ -701,7 +701,7 @@ function NavicatMainPanel({ activeConnection, selectedSchemaName: propsSelectedS
 
   useEffect(() => {
     if (currentSchemaName && activeConnection) {
-      console.log('[NavicatMainPanel] Schema changed:', currentSchemaName);
+      console.log('[OpenDbMainPanel] Schema changed:', currentSchemaName);
     }
   }, [currentSchemaName, activeConnection]);
 
@@ -1762,4 +1762,4 @@ function NavicatMainPanel({ activeConnection, selectedSchemaName: propsSelectedS
   );
 }
 
-export default NavicatMainPanel;
+export default OpenDbMainPanel;
