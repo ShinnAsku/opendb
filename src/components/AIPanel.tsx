@@ -260,7 +260,7 @@ function AIPanel() {
           let desc = `${indent}${node.type}: ${node.name}`;
           if (node.children) {
             for (const child of node.children) {
-              if (child.type === "column") {
+              if (child.type === "function") {
                 desc += `\n${indent}  - ${child.name}`;
               } else {
                 desc += `\n${describeNode(child, indent + "  ")}`;
@@ -426,7 +426,7 @@ function AIPanel() {
           );
         } else {
           const errorMsg =
-            err instanceof Error ? err.message : t('ai.callFailed');
+            err instanceof Error ? err.message : (typeof err === 'string' ? err : t('ai.callFailed'));
           setMessages((prev) =>
             prev.map((m) =>
               m.id === assistantId
@@ -486,7 +486,7 @@ function AIPanel() {
           title: t('ai.queryTitle'),
           type: "query",
           content: sql,
-          modified: false,
+
         });
       }
     },
@@ -499,7 +499,7 @@ function AIPanel() {
         title: t('ai.queryTitle'),
         type: "query",
         content: sql,
-        modified: false,
+
       });
     },
     [addTab]

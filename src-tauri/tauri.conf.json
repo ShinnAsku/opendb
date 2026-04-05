@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "openDB",
+  "productName": "OpenDB",
   "version": "0.1.0",
   "identifier": "com.opendb.app",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "openDB",
+        "title": "OpenDB",
         "width": 1280,
         "height": 800,
         "minWidth": 900,
@@ -27,6 +27,13 @@
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: https://asset.localhost; font-src 'self' data:; connect-src ipc: http://ipc.localhost https://api.deepseek.com https://api.openai.com https://dashscope.aliyuncs.com http://localhost:11434"
     }
   },
+  "plugins": {
+    "security": {
+      "secure-storage": {
+        "all": true
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
@@ -37,8 +44,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "copyright": "© 2026 openDB",
+    "copyright": "© 2026 OpenDB",
     "shortDescription": "A lightweight database management tool",
-    "longDescription": "openDB is a lightweight, open-source database management tool with AI assistance. Supports PostgreSQL, MySQL, SQLite, MSSQL, GaussDB and more."
+    "longDescription": "OpenDB is a lightweight, open-source database management tool with AI assistance. Supports PostgreSQL, MySQL, SQLite, MSSQL, GaussDB and more."
   }
 }

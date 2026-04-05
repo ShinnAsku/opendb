@@ -1,6 +1,6 @@
 import { executeQuery, executeSql, getTables, getColumns } from "@/lib/tauri-commands";
 import { generateCreateTable, type TableDef, type ColumnDef } from "@/lib/ddl-generator";
-import type { Connection } from "@/stores/app-store";
+import type { Connection, ColumnInfo } from "@/types";
 
 // ===== Types =====
 
@@ -476,6 +476,62 @@ export const TYPE_MAPPINGS: Record<string, Record<string, string>> = {
     'TINYINT': 'SMALLINT',
     'NUMERIC': 'NUMERIC',
   },
+  'opengauss->mysql': {
+    'serial': 'INT AUTO_INCREMENT',
+    'bigserial': 'BIGINT AUTO_INCREMENT',
+    'smallserial': 'SMALLINT AUTO_INCREMENT',
+    'text': 'LONGTEXT',
+    'boolean': 'TINYINT(1)',
+    'timestamp': 'DATETIME',
+    'timestamptz': 'DATETIME',
+    'jsonb': 'JSON',
+    'uuid': 'CHAR(36)',
+    'bytea': 'LONGBLOB',
+    'numeric': 'DECIMAL',
+    'double precision': 'DOUBLE',
+    'character varying': 'VARCHAR',
+    'character': 'CHAR',
+    'real': 'FLOAT',
+    'time': 'TIME',
+    'date': 'DATE',
+    'smallint': 'SMALLINT',
+    'integer': 'INT',
+    'bigint': 'BIGINT',
+    'json': 'JSON',
+  },
+  'mysql->opengauss': {
+    'INT AUTO_INCREMENT': 'SERIAL',
+    'BIGINT AUTO_INCREMENT': 'BIGSERIAL',
+    'SMALLINT AUTO_INCREMENT': 'SMALLSERIAL',
+    'TINYINT(1)': 'BOOLEAN',
+    'LONGTEXT': 'TEXT',
+    'MEDIUMTEXT': 'TEXT',
+    'TINYTEXT': 'TEXT',
+    'DATETIME': 'TIMESTAMP',
+    'JSON': 'JSONB',
+    'DOUBLE': 'DOUBLE PRECISION',
+    'BLOB': 'BYTEA',
+    'MEDIUMBLOB': 'BYTEA',
+    'LONGBLOB': 'BYTEA',
+    'TINYBLOB': 'BYTEA',
+    'DECIMAL': 'NUMERIC',
+    'FLOAT': 'REAL',
+    'YEAR': 'SMALLINT',
+    'ENUM': 'VARCHAR',
+    'SET': 'VARCHAR',
+    'BOOLEAN': 'BOOLEAN',
+    'DATE': 'DATE',
+    'TIME': 'TIME',
+    'CHAR': 'CHAR',
+    'VARCHAR': 'VARCHAR',
+    'TEXT': 'TEXT',
+    'INT': 'INTEGER',
+    'BIGINT': 'BIGINT',
+    'SMALLINT': 'SMALLINT',
+    'MEDIUMINT': 'INTEGER',
+    'TINYINT': 'SMALLINT',
+    'NUMERIC': 'NUMERIC',
+  },
 };
 
 // ===== Helpers =====
@@ -669,7 +725,7 @@ export async function loadSourceTables(
 ): Promise<TableMigrationInfo[]> {
   const tables = await getTables(connectionId);
   return tables
-    .filter(t => t.type === 'table')
+    .filter(() => true)
     .filter(t => !schema || t.schema === schema)
     .map(t => ({
       name: t.name,
@@ -694,25 +750,26 @@ export async function generateMigrationDDL(
 
   // Build ColumnDef array with type mapping
   const mappedColumns: ColumnDef[] = columns.map(col => {
-    const mappedType = mapType(col.dataType, sourceConnection.type, targetConnection.type);
+    const mappedType = mapType(col.type, sourceConnection.type, targetConnection.type);
     return {
       name: col.name,
       dataType: mappedType,
-      nullable: col.nullable,
-      primaryKey: col.isPrimaryKey,
+      nullable: !col.notNull,
+      primaryKey: col.primaryKey,
       autoIncrement: false, // Will be handled by type mapping
-      unique: false,
+      unique: col.unique,
     };
   });
 
   // Check if the original type implies auto-increment
   const sourceTypeLower = sourceConnection.type.toLowerCase();
   for (const col of columns) {
-    const typeLower = col.dataType.toLowerCase();
+    const typeLower = col.type.toLowerCase();
     if (
       (sourceTypeLower === 'mysql' && typeLower.includes('auto_increment')) ||
       (sourceTypeLower === 'postgresql' && (typeLower === 'serial' || typeLower === 'bigserial' || typeLower === 'smallserial')) ||
-      (sourceTypeLower === 'gaussdb' && (typeLower === 'serial' || typeLower === 'bigserial' || typeLower === 'smallserial'))
+      (sourceTypeLower === 'gaussdb' && (typeLower === 'serial' || typeLower === 'bigserial' || typeLower === 'smallserial')) ||
+      (sourceTypeLower === 'opengauss' && (typeLower === 'serial' || typeLower === 'bigserial' || typeLower === 'smallserial'))
     ) {
       const mapped = mappedColumns.find(c => c.name === col.name);
       if (mapped) mapped.autoIncrement = true;
@@ -827,7 +884,7 @@ export async function migrateData(
       progress.currentStep = 'creating';
       onProgress({ ...progress });
 
-      let columns: { name: string; dataType: string; nullable: boolean; isPrimaryKey: boolean }[];
+      let columns: ColumnInfo[];
       try {
         columns = await getColumns(config.sourceConnectionId, tableName, tableSchema);
       } catch (err) {
@@ -846,21 +903,21 @@ export async function migrateData(
 
       // Step 2: Generate DDL for target
       const mappedColumns: ColumnDef[] = columns.map(col => {
-        const mappedType = mapType(col.dataType, sourceConnection.type, targetConnection.type);
+        const mappedType = mapType(col.type, sourceConnection.type, targetConnection.type);
         return {
           name: col.name,
           dataType: mappedType,
-          nullable: col.nullable,
-          primaryKey: col.isPrimaryKey,
-          autoIncrement: false,
-          unique: false,
+          nullable: !col.notNull,
+          primaryKey: col.primaryKey,
+          autoIncrement: false, // Will be handled by type mapping
+          unique: col.unique,
         };
       });
 
       // Handle auto-increment detection
       const sourceTypeLower = sourceConnection.type.toLowerCase();
       for (const col of columns) {
-        const typeLower = col.dataType.toLowerCase();
+        const typeLower = col.type.toLowerCase();
         if (
           (sourceTypeLower === 'mysql' && typeLower.includes('auto_increment')) ||
           (sourceTypeLower === 'postgresql' && (typeLower === 'serial' || typeLower === 'bigserial' || typeLower === 'smallserial')) ||

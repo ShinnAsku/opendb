@@ -62,7 +62,7 @@ npm install -g pnpm
    - C++ ATL（最新版本）
 5. 点击安装，等待完成
 
-### 第五步：构建 openDB
+### 第五步：构建 OpenDB
 
 打开 CMD 或 PowerShell，进入项目根目录：
 
@@ -95,7 +95,7 @@ src-tauri/target/release/bundle/
 └── ...
 ```
 
-**推荐使用 NSIS 安装包**（`openDB_0.1.0_x64-setup.exe`），它提供了更好的安装体验。
+**推荐使用 NSIS 安装包**（`OpenDB_0.1.0_x64-setup.exe`），它提供了更好的安装体验。
 
 也可以直接运行免安装版本：
 ```

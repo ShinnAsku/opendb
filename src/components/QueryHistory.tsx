@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Clock, Trash2, CheckCircle2, XCircle, Search } from "lucide-react";
-import { useAppStore, type QueryHistoryEntry } from "@/stores/app-store";
+import { useAppStore } from "@/stores/app-store";
+import type { QueryHistoryEntry } from "@/types";
 import { t } from "@/lib/i18n";
 
 function QueryHistory() {
@@ -13,13 +14,13 @@ function QueryHistory() {
     ? queryHistory.filter(
         (h) =>
           h.sql.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          h.connectionName.toLowerCase().includes(searchTerm.toLowerCase())
+          h.connectionId.toLowerCase().includes(searchTerm.toLowerCase())
       )
     : queryHistory;
 
   const handleLoadQuery = (entry: QueryHistoryEntry) => {
     // Check if there's already a tab with this SQL
-    const existingTab = tabs.find((t) => t.content.trim() === entry.sql.trim());
+    const existingTab = tabs.find((t) => t.content?.trim() === entry.sql.trim());
     if (existingTab) {
       setActiveTab(existingTab.id);
       return;
@@ -29,7 +30,6 @@ function QueryHistory() {
       title: entry.sql.split("\n")[0]?.trim().slice(0, 30) || t('history.title'),
       type: "query",
       content: entry.sql,
-      modified: false,
     });
   };
 
@@ -88,7 +88,7 @@ function QueryHistory() {
               className="flex flex-col items-start gap-0.5 w-full px-2 py-1.5 text-xs rounded transition-colors hover:bg-muted text-left group"
             >
               <div className="flex items-center gap-1.5 w-full">
-                {entry.success ? (
+                {!entry.error ? (
                   <CheckCircle2 size={10} className="text-success shrink-0" />
                 ) : (
                   <XCircle size={10} className="text-destructive shrink-0" />
@@ -97,12 +97,12 @@ function QueryHistory() {
                   {truncateSql(entry.sql)}
                 </span>
                 <span className="text-[9px] text-muted-foreground/60 shrink-0">
-                  {entry.executionTime.toFixed(0)} ms
+                  {entry.duration.toFixed(0)} ms
                 </span>
               </div>
               <div className="flex items-center gap-2 pl-4 text-[9px] text-muted-foreground/60">
-                <span>{entry.connectionName}</span>
-                <span>{formatTime(entry.timestamp)}</span>
+                <span>{entry.connectionId}</span>
+                <span>{formatTime(new Date(entry.timestamp).getTime())}</span>
               </div>
             </button>
           ))}

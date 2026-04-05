@@ -3,24 +3,22 @@ import { useAppStore } from "@/stores/app-store";
 import { t } from "@/lib/i18n";
 
 function TabBar() {
-  const { tabs, activeTabId, setActiveTab, closeTab, addTab, connections } =
+  const { tabs, activeTabId, setActiveTab, closeTab, addTab } =
     useAppStore();
 
   const handleAddTab = () => {
     const queryCount = tabs.filter((t) => t.type === "query").length + 1;
     addTab({
-      title: `${t('tab.query')} ${queryCount}`,
-      type: "query",
-      content: "",
-      modified: false,
-    });
+        title: `${t('tab.newQuery')} ${queryCount}`,
+        type: "query",
+        content: "",
+      });
   };
 
   // Get connection color for tab
   const getConnectionColor = (connectionId?: string): string | undefined => {
     if (!connectionId) return undefined;
-    const conn = connections.find((c) => c.id === connectionId);
-    return conn?.color;
+    return undefined;
   };
 
   return (
@@ -47,10 +45,7 @@ function TabBar() {
                 />
               )}
 
-              {/* Modified indicator */}
-              {tab.modified && (
-                <span className="w-1.5 h-1.5 rounded-full bg-[hsl(var(--tab-active))] shrink-0" />
-              )}
+
 
               <span className="truncate max-w-[120px]">{tab.title}</span>
 

@@ -66,6 +66,7 @@ function buildColumnConstraints(col: ColumnDef, dbType: string): string[] {
         break;
       case 'postgresql':
       case 'gaussdb':
+      case 'opengauss':
         // serial/bigserial handle this implicitly; for integer types we add GENERATED ALWAYS AS IDENTITY
         if (col.dataType !== 'serial' && col.dataType !== 'bigserial' && col.dataType !== 'smallserial') {
           parts.push('GENERATED ALWAYS AS IDENTITY');
@@ -321,6 +322,73 @@ export function generateAlterTable(
   changes: AlterColumnChange[],
   dbType: string
 ): string {
+  if (changes.length === 0) return '';
+
+  const schemaPrefix = schema ? `${quote(schema, dbType)}.` : '';
+  const fullTableName = `${schemaPrefix}${quote(tableName, dbType)}`;
+
+  // For PostgreSQL/GaussDB, each ALTER COLUMN clause must be a separate statement
+  const isPg = dbType === 'postgresql' || dbType === 'gaussdb' || dbType === 'opengauss';
+
+  if (isPg) {
+    const statements: string[] = [];
+    const simpleLines: string[] = []; // ADD/DROP can be combined
+
+    for (const change of changes) {
+      switch (change.type) {
+        case 'add': {
+          if (!change.column) break;
+          const colName = quote(change.column.name, dbType);
+          const colType = buildColumnType(change.column, dbType);
+          const constraints = buildColumnConstraints(change.column, dbType);
+          const parts = [colName, colType, ...constraints];
+          simpleLines.push(`  ADD COLUMN ${parts.join(' ')}`);
+          break;
+        }
+        case 'drop': {
+          if (!change.oldName) break;
+          simpleLines.push(`  DROP COLUMN ${quote(change.oldName, dbType)}`);
+          break;
+        }
+        case 'modify': {
+          if (!change.column) break;
+          const colName = quote(change.column.name, dbType);
+          const colType = buildColumnType(change.column, dbType);
+          // Each ALTER COLUMN sub-clause needs its own ALTER TABLE statement
+          statements.push(`ALTER TABLE ${fullTableName}\n  ALTER COLUMN ${colName} TYPE ${colType};`);
+          if (!change.column.nullable) {
+            statements.push(`ALTER TABLE ${fullTableName}\n  ALTER COLUMN ${colName} SET NOT NULL;`);
+          } else {
+            statements.push(`ALTER TABLE ${fullTableName}\n  ALTER COLUMN ${colName} DROP NOT NULL;`);
+          }
+          if (change.column.defaultValue !== undefined && change.column.defaultValue !== '') {
+            statements.push(`ALTER TABLE ${fullTableName}\n  ALTER COLUMN ${colName} SET DEFAULT ${change.column.defaultValue};`);
+          }
+          // Handle column comment
+          if (change.column.comment) {
+            const escapedComment = change.column.comment.replace(/'/g, "''");
+            statements.push(`COMMENT ON COLUMN ${fullTableName}.${colName} IS '${escapedComment}';`);
+          }
+          break;
+        }
+        case 'rename': {
+          if (!change.oldName || !change.column) break;
+          statements.push(`ALTER TABLE ${fullTableName}\n  RENAME COLUMN ${quote(change.oldName, dbType)} TO ${quote(change.column.name, dbType)};`);
+          break;
+        }
+      }
+    }
+
+    // Combine ADD/DROP lines into one ALTER TABLE, then append modify statements
+    const result: string[] = [];
+    if (simpleLines.length > 0) {
+      result.push(`ALTER TABLE ${fullTableName}\n${simpleLines.join(',\n')};`);
+    }
+    result.push(...statements);
+    return result.join('\n\n');
+  }
+
+  // For other databases (MySQL, MSSQL, etc.) - single ALTER TABLE with comma-separated clauses
   const lines: string[] = [];
 
   for (const change of changes) {
@@ -357,18 +425,6 @@ export function generateAlterTable(
           case 'mssql':
             lines.push(`  ALTER COLUMN ${colName} ${colType}`);
             break;
-          case 'postgresql':
-          case 'gaussdb':
-            lines.push(`  ALTER COLUMN ${colName} TYPE ${colType}`);
-            if (!change.column.nullable) {
-              lines.push(`  ALTER COLUMN ${colName} SET NOT NULL`);
-            } else {
-              lines.push(`  ALTER COLUMN ${colName} DROP NOT NULL`);
-            }
-            if (change.column.defaultValue) {
-              lines.push(`  ALTER COLUMN ${colName} SET DEFAULT ${change.column.defaultValue}`);
-            }
-            break;
           default:
             lines.push(`  ALTER COLUMN ${parts.join(' ')}`);
         }
@@ -392,7 +448,5 @@ export function generateAlterTable(
   }
 
   if (lines.length === 0) return '';
-
-  const schemaPrefix = schema ? `${quote(schema, dbType)}.` : '';
-  return `ALTER TABLE ${schemaPrefix}${quote(tableName, dbType)}\n${lines.join(',\n')};`;
+  return `ALTER TABLE ${fullTableName}\n${lines.join(',\n')};`;
 }

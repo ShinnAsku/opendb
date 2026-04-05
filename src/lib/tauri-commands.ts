@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectionConfig, QueryResult, ExecuteResult, TableInfo, ColumnInfo, ConnectionHealth } from "@/stores/app-store";
+import type { ConnectionConfig, QueryResult, PagedQueryResult, ExecuteResult, TableInfo, ColumnInfo, ConnectionHealth } from "@/types";
+import { getPassword } from "./secure-storage";
 
 // Check if we're running in Tauri environment
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -12,7 +13,21 @@ async function safeInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
   return invoke<T>(cmd, args);
 }
 
-export async function connectDatabase(config: ConnectionConfig): Promise<string> {
+export interface ConnectResult {
+  connectionId: string;
+  detectedType: string;
+}
+
+export async function connectDatabase(config: ConnectionConfig): Promise<ConnectResult> {
+  // Get password from secure storage if not provided
+  let password = config.password;
+  if (!password && config.id) {
+    const storedPassword = await getPassword(config.id);
+    if (storedPassword) {
+      password = storedPassword;
+    }
+  }
+  
   // Convert frontend ConnectionConfig to backend format (camelCase)
   const backendConfig = {
     id: config.id || crypto.randomUUID(),
@@ -21,13 +36,13 @@ export async function connectDatabase(config: ConnectionConfig): Promise<string>
     host: config.host || undefined,
     port: config.port || undefined,
     username: config.username || undefined,
-    password: config.password || undefined,
+    password: password || undefined,
     database: config.database || undefined,
-    sslEnabled: config.sslEnabled,
+    sslEnabled: config.enableSsl || false,
     keepaliveInterval: config.keepaliveInterval || 30,
     autoReconnect: config.autoReconnect !== false
   };
-  return safeInvoke<string>("connect_to_database", { config: backendConfig });
+  return safeInvoke<ConnectResult>("connect_to_database", { config: backendConfig });
 }
 
 export async function disconnectDatabase(id: string): Promise<void> {
@@ -36,29 +51,85 @@ export async function disconnectDatabase(id: string): Promise<void> {
 
 export async function executeQuery(id: string, sql: string): Promise<QueryResult> {
   const raw = await safeInvoke<any>("execute_query", { id, sql });
+  return mapRawQueryResult(raw);
+}
+
+export async function executeQueryPaged(id: string, sql: string, limit: number, offset: number): Promise<PagedQueryResult> {
+  const raw = await safeInvoke<any>("execute_query_paged", { id, sql, limit, offset });
+  return {
+    ...mapRawQueryResult(raw),
+    hasMore: raw.hasMore ?? false,
+  };
+}
+
+// Helper: map raw backend query result to frontend format
+function mapRawQueryResult(raw: any): QueryResult {
+  const columns = (raw.columns || []).map((c: any) => ({
+    name: c.name,
+    dataType: c.dataType,
+    nullable: c.nullable,
+    isPrimaryKey: c.isPrimaryKey,
+  }));
+  
+  // Helper function to get the actual value from serde_json::Value
+  const getActualValue = (value: any): any => {
+    if (value === null || value === undefined) {
+      return "";
+    }
+    
+    // Check if value is a serde_json::Value object
+    if (typeof value === 'object' && value !== null) {
+      // Check for serde_json::Value types
+      if (value.hasOwnProperty('type') && value.hasOwnProperty('value')) {
+        // This is a serde_json::Value wrapper
+        return getActualValue(value.value);
+      }
+      
+      // Check if it's a string value
+      if (value.hasOwnProperty('String')) {
+        return value.String;
+      }
+      
+      // Check if it's a number value
+      if (value.hasOwnProperty('Number')) {
+        return value.Number;
+      }
+      
+      // Check if it's a boolean value
+      if (value.hasOwnProperty('Bool')) {
+        return value.Bool;
+      }
+    }
+    
+    return value;
+  };
   
   // Map camelCase from Rust to our frontend format
   return {
-    columns: (raw.columns || []).map((c: any) => ({
-      name: c.name,
-      dataType: c.dataType,
-      nullable: c.nullable,
-      isPrimaryKey: c.isPrimaryKey,
-    })),
+    columns,
     rows: (raw.rows || []).map((row: any) => {
       const newRow: Record<string, any> = {};
-      for (const [key, value] of Object.entries(row)) {
-        // 确保所有类型的数据都能被正确处理
-        if (value === null || value === undefined) {
-          newRow[key] = "";
-        } else {
-          newRow[key] = String(value);
+      
+      // Check if row is an array (index-based) or object (key-based)
+      if (Array.isArray(row) && columns.length > 0) {
+        // Array-based rows (common in some database drivers)
+        row.forEach((value: any, index: number) => {
+          if (index < columns.length) {
+            const columnName = columns[index].name;
+            newRow[columnName] = getActualValue(value);
+          }
+        });
+      } else {
+        // Object-based rows
+        for (const [key, value] of Object.entries(row)) {
+          newRow[key] = getActualValue(value);
         }
       }
+      
       return newRow;
     }),
     rowCount: raw.rowCount ?? 0,
-    executionTime: raw.executionTimeMs ?? 0,
+    duration: raw.executionTimeMs ?? 0,
   };
 }
 
@@ -67,17 +138,37 @@ export async function executeSql(id: string, sql: string): Promise<ExecuteResult
   return {
     success: true,
     message: `${raw.rowsAffected ?? 0} rows affected`,
-    affectedRows: raw.rowsAffected ?? 0,
-    executionTime: raw.executionTimeMs ?? 0,
+
+    duration: raw.executionTimeMs ?? 0,
   };
 }
 
 export async function getTables(id: string): Promise<TableInfo[]> {
   const raw = await safeInvoke<any[]>("get_tables", { id });
   return raw.map((t: any) => ({
+    oid: t.oid ?? null,
     name: t.name,
-    schema: t.schema,
-    type: (t.tableType || "table").toLowerCase() as "table" | "view",
+    schema: t.schema ?? "",
+    owner: t.owner ?? null,
+    size: "",
+    description: t.comment ?? "",
+    acl: t.acl ?? null,
+    tablespace: "",
+    hasIndexes: t.hasIndexes ?? null,
+    hasRules: false,
+    hasTriggers: t.hasTriggers ?? null,
+    rowCount: t.rowCount ?? null,
+    primaryKey: t.primaryKey ?? null,
+    partitionOf: t.partitionOf ?? null,
+    tableType: t.tableType ?? "TABLE",
+    created: new Date(),
+    modified: new Date(),
+    // MySQL fields
+    engine: t.engine ?? null,
+    dataLength: t.dataLength ?? null,
+    createTime: t.createTime ?? null,
+    updateTime: t.updateTime ?? null,
+    collation: t.collation ?? null,
   }));
 }
 
@@ -85,9 +176,15 @@ export async function getColumns(id: string, table: string, schema?: string): Pr
   const raw = await safeInvoke<any[]>("get_columns", { id, table, schema });
   return raw.map((c: any) => ({
     name: c.name,
-    dataType: c.dataType,
-    nullable: c.nullable,
-    isPrimaryKey: c.isPrimaryKey,
+    type: c.dataType,
+    length: c.characterMaximumLength ?? null,
+    precision: c.numericPrecision ?? null,
+    scale: c.numericScale ?? null,
+    notNull: !c.nullable,
+    defaultValue: c.defaultValue || null,
+    description: c.comment || "",
+    primaryKey: c.isPrimaryKey,
+    unique: false,
   }));
 }
 
@@ -106,7 +203,7 @@ export async function testConnection(config: ConnectionConfig): Promise<boolean>
     username: config.username || undefined,
     password: config.password || undefined,
     database: config.database || undefined,
-    sslEnabled: config.sslEnabled,
+    sslEnabled: config.enableSsl || false,
     keepaliveInterval: config.keepaliveInterval || 30,
     autoReconnect: config.autoReconnect !== false
   };
@@ -129,8 +226,153 @@ export async function exportTableSql(id: string, table: string, schema?: string)
 export async function getConnectionStatus(id: string): Promise<ConnectionHealth> {
   const raw = await safeInvoke<any>("get_connection_status", { id });
   return {
-    healthy: raw.healthy ?? true,
-    reconnectCount: raw.reconnectCount ?? 0,
-    lastHeartbeat: raw.lastHeartbeat ?? "",
+    status: raw.healthy ? 'healthy' : 'unhealthy',
+    lastChecked: new Date(),
+  };
+}
+
+// ============================================================================
+// New metadata query commands
+// ============================================================================
+
+export async function getViews(id: string, schema?: string): Promise<TableInfo[]> {
+  const raw = await safeInvoke<any[]>("get_views", { id, schema: schema ?? null });
+  return raw.map((t: any) => ({
+    oid: t.oid ?? null,
+    name: t.name,
+    schema: t.schema ?? "",
+    owner: t.owner ?? null,
+    size: "",
+    description: t.comment ?? "",
+    acl: t.acl ?? null,
+    tablespace: "",
+    hasIndexes: t.hasIndexes ?? null,
+    hasRules: false,
+    hasTriggers: t.hasTriggers ?? null,
+    rowCount: t.rowCount ?? null,
+    primaryKey: t.primaryKey ?? null,
+    partitionOf: t.partitionOf ?? null,
+    tableType: t.tableType ?? "VIEW",
+    created: new Date(),
+    modified: new Date(),
+    // MySQL fields
+    engine: t.engine ?? null,
+    dataLength: t.dataLength ?? null,
+    createTime: t.createTime ?? null,
+    updateTime: t.updateTime ?? null,
+    collation: t.collation ?? null,
+  }));
+}
+
+export async function getTableIndexes(id: string, table: string, schema?: string): Promise<any[]> {
+  return safeInvoke<any[]>("get_indexes", { id, table, schema: schema ?? null });
+}
+
+export async function getTableForeignKeys(id: string, table: string, schema?: string): Promise<any[]> {
+  return safeInvoke<any[]>("get_foreign_keys", { id, table, schema: schema ?? null });
+}
+
+export async function getTableRowCount(id: string, table: string, schema?: string): Promise<number> {
+  return safeInvoke<number>("get_table_row_count", { id, table, schema: schema ?? null });
+}
+
+// ============================================================================
+// New data editing commands
+// ============================================================================
+
+export async function updateTableRows(
+  id: string,
+  table: string,
+  updates: [string, any][],
+  whereClause: string,
+  schema?: string
+): Promise<ExecuteResult> {
+  const raw = await safeInvoke<any>("update_table_rows", {
+    id,
+    table,
+    schema: schema ?? null,
+    updates,
+    where_clause: whereClause,
+  });
+  return {
+    success: true,
+    message: `${raw.rowsAffected ?? 0} rows affected`,
+    duration: raw.executionTimeMs ?? 0,
+  };
+}
+
+export async function insertTableRow(
+  id: string,
+  table: string,
+  values: [string, any][],
+  schema?: string
+): Promise<ExecuteResult> {
+  const raw = await safeInvoke<any>("insert_table_row", {
+    id,
+    table,
+    schema: schema ?? null,
+    values,
+  });
+  return {
+    success: true,
+    message: `${raw.rowsAffected ?? 0} rows affected`,
+    duration: raw.executionTimeMs ?? 0,
+  };
+}
+
+export async function deleteTableRows(
+  id: string,
+  table: string,
+  whereClause: string,
+  schema?: string
+): Promise<ExecuteResult> {
+  const raw = await safeInvoke<any>("delete_table_rows", {
+    id,
+    table,
+    schema: schema ?? null,
+    where_clause: whereClause,
+  });
+  return {
+    success: true,
+    message: `${raw.rowsAffected ?? 0} rows affected`,
+    duration: raw.executionTimeMs ?? 0,
+  };
+}
+
+export async function getTableData(
+  id: string,
+  table: string,
+  page: number = 1,
+  pageSize: number = 100,
+  orderBy?: string,
+  schema?: string
+): Promise<QueryResult> {
+  const raw = await safeInvoke<any>("get_table_data", {
+    id,
+    table,
+    schema: schema ?? null,
+    page,
+    pageSize,
+    orderBy: orderBy ?? null,
+  });
+
+  const columns = (raw.columns || []).map((c: any) => ({
+    name: c.name,
+    dataType: c.dataType,
+    nullable: c.nullable,
+    isPrimaryKey: c.isPrimaryKey,
+  }));
+
+  return {
+    columns,
+    rows: (raw.rows || []).map((row: any) => {
+      const newRow: Record<string, any> = {};
+      for (const [key, value] of Object.entries(row)) {
+        newRow[key] = value;
+      }
+      return newRow;
+    }),
+    rowCount: raw.rowCount ?? 0,
+    duration: raw.executionTimeMs ?? 0,
   };
 }

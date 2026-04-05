@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { useAppStore, type Connection, type SchemaNode } from "@/stores/app-store";
+import { useConnectionStore, useTabStore, useUIStore } from "@/stores/app-store";
+import type { Connection } from "@/types";
 import { t } from "@/lib/i18n";
 import Toolbar from "./Toolbar";
 import Sidebar from "./Sidebar";
@@ -13,6 +14,9 @@ import ConnectionDialog from "./ConnectionDialog";
 import SnippetPanel from "./SnippetPanel";
 import SchemaDiffDialog from "./SchemaDiffDialog";
 import DataMigration from "./DataMigration";
+import ErrorBoundary from "./ErrorBoundary";
+import ERSelectorDialog from "./ERSelectorDialog";
+import ImportExportDialog from "./ImportExportDialog";
 
 function MainLayout() {
   const {
@@ -20,25 +24,29 @@ function MainLayout() {
     sidebarOpen,
     toggleSidebar,
     toggleAIPanel,
+    snippetPanelOpen,
+    toggleSnippetPanel,
+    selectedSchemaName,
+  } = useUIStore();
+  
+  const {
     addTab,
     closeTab,
     activeTabId,
     tabs,
+  } = useTabStore();
+  
+  const {
     activeConnectionId,
     connections,
-    snippetPanelOpen,
-    toggleSnippetPanel,
-    setSelectedSchemaId,
-    selectedSchemaName,
-    setSelectedSchemaName,
-    setSelectedTable,
-    setSelectedTableId,
-  } = useAppStore();
+  } = useConnectionStore();
 
   const [connectionDialogOpen, setConnectionDialogOpen] = useState(false);
   const [editingConnection, setEditingConnection] = useState<Connection | undefined>();
   const [schemaDiffOpen, setSchemaDiffOpen] = useState(false);
   const [dataMigrationOpen, setDataMigrationOpen] = useState(false);
+  const [erSelectorOpen, setERSelectorOpen] = useState(false);
+  const [importExportMode, setImportExportMode] = useState<"import" | "export" | null>(null);
 
   const handleOpenConnectionDialog = useCallback(
     (editConnection?: Connection) => {
@@ -54,36 +62,66 @@ function MainLayout() {
   }, []);
 
   const handleOpenERDiagram = useCallback(() => {
-    if (!activeConnectionId) return;
-    // Open ER diagram as a tab
+    setERSelectorOpen(true);
+  }, []);
+
+  const handleERSelectorConfirm = useCallback((connectionId: string, schemaName?: string) => {
     addTab({
       title: t('layout.erDiagram'),
-      type: "er_diagram",
+      type: "er",
       content: "",
-      connectionId: activeConnectionId,
-      modified: false,
+      connectionId,
+      schemaName,
     });
-  }, [activeConnectionId, addTab]);
-
-  const handleOpenTableDesigner = useCallback(() => {
-    addTab({
-      title: t('layout.tableDesigner'),
-      type: "table_designer",
-      content: "",
-      connectionId: activeConnectionId || undefined,
-      modified: false,
-    });
-  }, [activeConnectionId, addTab]);
+    setERSelectorOpen(false);
+    setTimeout(() => {
+      const newActiveId = useTabStore.getState().activeTabId;
+      if (newActiveId) {
+        window.dispatchEvent(new CustomEvent('openQueryTab', { detail: { tabId: newActiveId } }));
+      }
+    }, 0);
+  }, [addTab]);
 
   const handleOpenQueryAnalyzer = useCallback(() => {
     addTab({
       title: t('layout.queryAnalyzer'),
-      type: "query_analyzer",
+      type: "analyzer",
       content: "",
       connectionId: activeConnectionId || undefined,
-      modified: false,
+
     });
+    setTimeout(() => {
+      const newActiveId = useTabStore.getState().activeTabId;
+      if (newActiveId) {
+        window.dispatchEvent(new CustomEvent('openQueryTab', { detail: { tabId: newActiveId } }));
+      }
+    }, 0);
   }, [activeConnectionId, addTab]);
+
+  // Clear test connection data on startup
+  useEffect(() => {
+    try {
+      const STORAGE_KEY = "opendb-connections";
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        // Filter out test connections (those with "test" in name or host)
+        const filtered = parsed.filter((conn: any) => {
+          const name = (conn.name || "").toLowerCase();
+          const host = (conn.host || "").toLowerCase();
+          return !name.includes('test') && !host.includes('test') && !name.includes('示例') && !host.includes('示例');
+        });
+        if (filtered.length !== parsed.length) {
+          console.log(`Cleared ${parsed.length - filtered.length} test connections`);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(filtered));
+          // Force reload connections in store
+          useConnectionStore.getState().setConnections(filtered);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to clear test connections:", e);
+    }
+  }, []);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -104,8 +142,14 @@ function MainLayout() {
           title: `${t('tab.query')} ${tabs.length + 1}`,
           type: "query",
           content: "",
-          modified: false,
+    
         });
+        setTimeout(() => {
+          const newActiveId = useTabStore.getState().activeTabId;
+          if (newActiveId) {
+            window.dispatchEvent(new CustomEvent('openQueryTab', { detail: { tabId: newActiveId } }));
+          }
+        }, 0);
         return;
       }
 
@@ -173,16 +217,6 @@ function MainLayout() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [addTab, closeTab, activeTabId, tabs.length, toggleSidebar, toggleAIPanel]);
 
-  const handleSchemaClick = useCallback((schemaName: string, connectionId: string) => {
-    setSelectedSchemaName(schemaName);
-    setSelectedSchemaId(`${connectionId}-${schemaName}`);
-  }, [setSelectedSchemaId, setSelectedSchemaName]);
-
-  const handleTableClick = useCallback((table: SchemaNode, _connectionId: string) => {
-    setSelectedTable(table);
-    setSelectedTableId(table.id);
-  }, [setSelectedTable, setSelectedTableId]);
-
   const activeConnection = activeConnectionId
     ? connections.find((c) => c.id === activeConnectionId) || null
     : null;
@@ -195,9 +229,10 @@ function MainLayout() {
         onOpenSnippetPanel={toggleSnippetPanel}
         onOpenSchemaDiff={() => setSchemaDiffOpen(true)}
         onOpenERDiagram={handleOpenERDiagram}
-        onOpenTableDesigner={handleOpenTableDesigner}
         onOpenQueryAnalyzer={handleOpenQueryAnalyzer}
         onOpenDataMigration={() => setDataMigrationOpen(true)}
+        onOpenImport={() => setImportExportMode("import")}
+        onOpenExport={() => setImportExportMode("export")}
       />
 
       {/* Main Content: Sidebar + Navicat Panel */}
@@ -205,13 +240,14 @@ function MainLayout() {
         {/* Left Sidebar (Connection Tree) */}
         {sidebarOpen && (
           <Panel defaultSize={18} minSize={12} maxSize={30}>
-            <Sidebar openConnectionDialog={handleOpenConnectionDialog} onSchemaClick={handleSchemaClick} onTableClick={handleTableClick} />
+            <Sidebar openConnectionDialog={handleOpenConnectionDialog} />
           </Panel>
         )}
         {sidebarOpen && <PanelResizeHandle className="w-px bg-border hover:bg-[hsl(var(--tab-active))] transition-colors cursor-col-resize" />}
 
         {/* Center: Navicat-style Panel */}
         <Panel>
+          <ErrorBoundary>
           {activeConnection ? (
             <NavicatMainPanel activeConnection={activeConnection} selectedSchemaName={selectedSchemaName} />
           ) : (
@@ -220,6 +256,7 @@ function MainLayout() {
               <EditorPanel />
             </div>
           )}
+          </ErrorBoundary>
         </Panel>
       </PanelGroup>
 
@@ -242,7 +279,7 @@ function MainLayout() {
           // Insert SQL into active tab or create new one
           const activeTab = tabs.find((t) => t.id === activeTabId);
           if (activeTab && activeTab.type === "query") {
-            useAppStore.getState().updateTabContent(
+            useTabStore.getState().updateTabContent(
               activeTabId!,
               activeTab.content ? activeTab.content + "\n" + sql : sql
             );
@@ -251,7 +288,7 @@ function MainLayout() {
               title: t('welcome.codeSnippet'),
               type: "query",
               content: sql,
-              modified: false,
+        
             });
           }
           toggleSnippetPanel();
@@ -265,6 +302,18 @@ function MainLayout() {
         isOpen={dataMigrationOpen}
         onClose={() => setDataMigrationOpen(false)}
       />
+      <ERSelectorDialog
+        isOpen={erSelectorOpen}
+        onClose={() => setERSelectorOpen(false)}
+        onConfirm={handleERSelectorConfirm}
+      />
+      {importExportMode && (
+        <ImportExportDialog
+          isOpen={true}
+          mode={importExportMode}
+          onClose={() => setImportExportMode(null)}
+        />
+      )}
     </div>
   );
 }

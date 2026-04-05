@@ -19,6 +19,7 @@ pub enum DatabaseType {
     MSSQL,
     ClickHouse,
     GaussDB,
+    OpenGauss,
 }
 
 /// SSH tunnel configuration
@@ -63,6 +64,9 @@ pub struct ColumnInfo {
     pub is_primary_key: bool,
     pub default_value: Option<String>,
     pub comment: Option<String>,
+    pub character_maximum_length: Option<i64>,
+    pub numeric_precision: Option<i64>,
+    pub numeric_scale: Option<i64>,
 }
 
 /// Query result with rows and metadata
@@ -75,6 +79,17 @@ pub struct QueryResult {
     pub execution_time_ms: u64,
 }
 
+/// Paged query result with has_more indicator for progressive loading
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PagedQueryResult {
+    pub columns: Vec<ColumnInfo>,
+    pub rows: Vec<serde_json::Map<String, serde_json::Value>>,
+    pub row_count: u64,
+    pub execution_time_ms: u64,
+    pub has_more: bool,
+}
+
 /// Table metadata information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +99,20 @@ pub struct TableInfo {
     pub row_count: Option<u64>,
     pub comment: Option<String>,
     pub table_type: String,
+    // Extended metadata (primarily for PostgreSQL)
+    pub oid: Option<i64>,
+    pub owner: Option<String>,
+    pub acl: Option<String>,
+    pub primary_key: Option<String>,
+    pub partition_of: Option<String>,
+    pub has_indexes: Option<bool>,
+    pub has_triggers: Option<bool>,
+    // Extended metadata (primarily for MySQL)
+    pub engine: Option<String>,
+    pub data_length: Option<i64>,
+    pub create_time: Option<String>,
+    pub update_time: Option<String>,
+    pub collation: Option<String>,
 }
 
 /// Result of an execute (INSERT/UPDATE/DELETE) operation
@@ -145,8 +174,17 @@ impl std::fmt::Display for DatabaseType {
             DatabaseType::MSSQL => write!(f, "mssql"),
             DatabaseType::ClickHouse => write!(f, "clickhouse"),
             DatabaseType::GaussDB => write!(f, "gaussdb"),
+            DatabaseType::OpenGauss => write!(f, "opengauss"),
         }
     }
+}
+
+/// Result returned after a successful database connection, including auto-detected type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectResult {
+    pub connection_id: String,
+    pub detected_type: DatabaseType,
 }
 
 /// Connection health status reported to the frontend

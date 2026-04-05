@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { useAppStore } from '@/stores/app-store';
+import { useAppStore } from "@/stores/app-store";
+import type { SlowQueryEntry } from "@/types";
 import { executeQuery } from '@/lib/tauri-commands';
 import { t } from '@/lib/i18n';
 import {
@@ -731,10 +732,10 @@ function QueryStatistics() {
   const { queryHistory } = useAppStore();
 
   const totalQueries = queryHistory.length;
-  const successfulQueries = queryHistory.filter(q => q.success).length;
+  const successfulQueries = queryHistory.filter(q => !q.error).length;
   const failedQueries = totalQueries - successfulQueries;
 
-  const executionTimes = queryHistory.map(q => q.executionTime).filter(t => t > 0);
+  const executionTimes = queryHistory.map(q => q.duration).filter(t => t > 0);
   const avgTime = executionTimes.length > 0
     ? executionTimes.reduce((a, b) => a + b, 0) / executionTimes.length
     : 0;
@@ -744,12 +745,12 @@ function QueryStatistics() {
   // Queries per minute (last 5 minutes)
   const now = Date.now();
   const fiveMinAgo = now - 5 * 60 * 1000;
-  const recentQueries = queryHistory.filter(q => q.timestamp > fiveMinAgo);
+  const recentQueries = queryHistory.filter(q => new Date(q.timestamp).getTime() > fiveMinAgo);
   const qpm = recentQueries.length / 5;
 
   // Top 5 slowest queries
   const slowest = [...queryHistory]
-    .sort((a, b) => b.executionTime - a.executionTime)
+    .sort((a, b) => b.duration - a.duration)
     .slice(0, 5);
 
   return (
@@ -778,7 +779,7 @@ function QueryStatistics() {
                 className="flex items-center gap-2 px-2 py-1 rounded bg-muted/50 text-[10px]"
               >
                 <span className="font-mono text-red-400 shrink-0">
-                  {q.executionTime.toFixed(0)}ms
+                  {q.duration.toFixed(0)}ms
                 </span>
                 <span className="font-mono text-foreground truncate flex-1">
                   {q.sql.substring(0, 80)}
@@ -860,6 +861,7 @@ export default function QueryAnalyzer({
       switch (dbType) {
         case 'postgresql':
         case 'gaussdb':
+        case 'opengauss':
           explainSql = `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS) ${sql}`;
           break;
         case 'mysql':
@@ -899,6 +901,7 @@ export default function QueryAnalyzer({
           switch (dbType) {
             case 'postgresql':
             case 'gaussdb':
+            case 'opengauss':
               parsed = parsePostgresExplain(jsonData);
               break;
             case 'mysql':
@@ -950,7 +953,7 @@ export default function QueryAnalyzer({
     }
   }, [connectionId, sql, dbType]);
 
-  const handleRerunSlowQuery = useCallback((query: SlowQuery) => {
+  const handleRerunSlowQuery = useCallback((query: SlowQueryEntry) => {
     setSql(query.sql);
     if (onInsertQuery) {
       onInsertQuery(query.sql);
@@ -1124,7 +1127,7 @@ export default function QueryAnalyzer({
                       <div className="flex flex-col items-center shrink-0 mt-0.5">
                         <Clock size={12} className="text-red-400" />
                         <span className="text-[10px] font-mono text-red-400 mt-0.5">
-                          {q.executionTime.toFixed(0)}ms
+                          {q.duration.toFixed(0)}ms
                         </span>
                       </div>
                       <div className="flex-1 min-w-0">
@@ -1133,7 +1136,7 @@ export default function QueryAnalyzer({
                         </pre>
                         <div className="flex items-center gap-2 mt-1">
                           <span className="text-[10px] text-muted-foreground">
-                            {q.connectionName}
+                            {q.connectionId}
                           </span>
                           <span className="text-[10px] text-muted-foreground">
                             {new Date(q.timestamp).toLocaleString()}

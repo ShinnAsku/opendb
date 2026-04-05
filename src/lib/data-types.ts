@@ -12,6 +12,7 @@ export type DbType = 'postgresql' | 'mysql' | 'sqlite' | 'gaussdb' | 'clickhouse
 const pgTypes: DataType[] = [
   { name: 'serial', category: 'numeric', hasLength: false, hasPrecision: false, hasScale: false },
   { name: 'bigserial', category: 'numeric', hasLength: false, hasPrecision: false, hasScale: false },
+  { name: 'smallserial', category: 'numeric', hasLength: false, hasPrecision: false, hasScale: false },
   { name: 'integer', category: 'numeric', hasLength: false, hasPrecision: false, hasScale: false },
   { name: 'bigint', category: 'numeric', hasLength: false, hasPrecision: false, hasScale: false },
   { name: 'smallint', category: 'numeric', hasLength: false, hasPrecision: false, hasScale: false },
@@ -27,10 +28,20 @@ const pgTypes: DataType[] = [
   { name: 'timestamp', category: 'date', hasLength: false, hasPrecision: false, hasScale: false },
   { name: 'timestamptz', category: 'date', hasLength: false, hasPrecision: false, hasScale: false },
   { name: 'time', category: 'date', hasLength: false, hasPrecision: false, hasScale: false },
+  { name: 'interval', category: 'date', hasLength: false, hasPrecision: false, hasScale: false },
   { name: 'json', category: 'json', hasLength: false, hasPrecision: false, hasScale: false },
   { name: 'jsonb', category: 'json', hasLength: false, hasPrecision: false, hasScale: false },
   { name: 'uuid', category: 'other', hasLength: false, hasPrecision: false, hasScale: false },
   { name: 'bytea', category: 'binary', hasLength: false, hasPrecision: false, hasScale: false },
+  { name: 'inet', category: 'other', hasLength: false, hasPrecision: false, hasScale: false },
+  { name: 'cidr', category: 'other', hasLength: false, hasPrecision: false, hasScale: false },
+  { name: 'macaddr', category: 'other', hasLength: false, hasPrecision: false, hasScale: false },
+  { name: 'xml', category: 'other', hasLength: false, hasPrecision: false, hasScale: false },
+  { name: 'ARRAY', category: 'other', hasLength: false, hasPrecision: false, hasScale: false },
+  { name: 'USER-DEFINED', category: 'other', hasLength: false, hasPrecision: false, hasScale: false },
+  { name: 'oid', category: 'numeric', hasLength: false, hasPrecision: false, hasScale: false },
+  { name: 'name', category: 'string', hasLength: false, hasPrecision: false, hasScale: false },
+  { name: 'regproc', category: 'other', hasLength: false, hasPrecision: false, hasScale: false },
 ];
 
 const mysqlTypes: DataType[] = [
@@ -125,6 +136,7 @@ const mssqlTypes: DataType[] = [
 export const DATA_TYPES: Record<string, DataType[]> = {
   postgresql: pgTypes,
   gaussdb: pgTypes,
+  opengauss: pgTypes,
   mysql: mysqlTypes,
   sqlite: sqliteTypes,
   clickhouse: clickhouseTypes,
@@ -150,4 +162,70 @@ export function getDataTypeInfo(dbType: string, typeName: string): DataType | un
 
 export function getTypesByCategory(dbType: string, category: DataType['category']): DataType[] {
   return DATA_TYPES[dbType]?.filter((t) => t.category === category) ?? [];
+}
+
+// PostgreSQL returns canonical SQL type names from information_schema that differ
+// from the common short names used in our dropdown. This mapping normalizes them.
+const PG_TYPE_ALIASES: Record<string, string> = {
+  'character varying': 'varchar',
+  'character': 'char',
+  'timestamp without time zone': 'timestamp',
+  'timestamp with time zone': 'timestamptz',
+  'time without time zone': 'time',
+  'time with time zone': 'time',
+  'double precision': 'double precision',
+  'bit varying': 'varchar',
+  'int': 'integer',
+  'int4': 'integer',
+  'int8': 'bigint',
+  'int2': 'smallint',
+  'float4': 'real',
+  'float8': 'double precision',
+  'bool': 'boolean',
+  'serial4': 'serial',
+  'serial8': 'bigserial',
+  'serial2': 'smallserial',
+};
+
+/**
+ * Normalize a database-returned type name to match the frontend dropdown values.
+ */
+export function normalizeDbType(dbType: string, rawType: string): string {
+  if (dbType === 'postgresql' || dbType === 'gaussdb' || dbType === 'opengauss') {
+    const lower = rawType.toLowerCase();
+    if (PG_TYPE_ALIASES[lower]) {
+      return PG_TYPE_ALIASES[lower];
+    }
+    const types = DATA_TYPES[dbType];
+    if (types) {
+      const found = types.find((t) => t.name.toLowerCase() === lower);
+      if (found) return found.name;
+    }
+    return rawType;
+  }
+
+  if (dbType === 'mysql') {
+    const types = DATA_TYPES[dbType];
+    if (types) {
+      const found = types.find((t) => t.name.toLowerCase() === rawType.toLowerCase());
+      if (found) return found.name;
+    }
+    return rawType.toUpperCase();
+  }
+
+  const types = DATA_TYPES[dbType];
+  if (types) {
+    const found = types.find((t) => t.name.toLowerCase() === rawType.toLowerCase());
+    if (found) return found.name;
+  }
+  return rawType;
+}
+
+/**
+ * Check if a default value represents a sequence/auto-increment pattern.
+ */
+export function isSequenceDefault(defaultValue: string | null | undefined): boolean {
+  if (!defaultValue) return false;
+  const upper = defaultValue.toUpperCase();
+  return upper.startsWith('NEXTVAL(');
 }

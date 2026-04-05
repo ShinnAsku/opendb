@@ -102,7 +102,7 @@ function DataMigration({ isOpen, onClose }: DataMigrationProps) {
     if (!conn) return;
 
     // Only load schemas for databases that support them
-    if (['postgresql', 'gaussdb', 'mssql'].includes(conn.type)) {
+    if (['postgresql', 'gaussdb', 'opengauss', 'mssql'].includes(conn.type)) {
       try {
         const schemas = await getSchemas(connId);
         if (target === 'source') {
@@ -497,10 +497,10 @@ function DataMigration({ isOpen, onClose }: DataMigrationProps) {
               )}
 
               <div className="border border-border rounded overflow-hidden max-h-[350px] overflow-y-auto">
-                <table className="w-full text-xs">
-                  <thead className="bg-muted/50 sticky top-0">
+                <table className="w-full text-xs border-collapse border">
+                  <thead className="sticky top-0" style={{ backgroundColor: 'hsl(var(--tab-active))' }}>
                     <tr>
-                      <th className="px-3 py-2 text-left font-medium text-foreground w-8">
+                      <th className="px-3 py-2 text-left font-medium text-white border border-white/30 w-8">
                         <input
                           type="checkbox"
                           checked={tables.length > 0 && tables.every((t) => t.selected)}
@@ -511,13 +511,13 @@ function DataMigration({ isOpen, onClose }: DataMigrationProps) {
                           className="rounded"
                         />
                       </th>
-                      <th className="px-3 py-2 text-left font-medium text-foreground">
+                      <th className="px-3 py-2 text-left font-medium text-white border border-white/30">
                         {t('migration.tableName')}
                       </th>
-                      <th className="px-3 py-2 text-left font-medium text-foreground">
+                      <th className="px-3 py-2 text-left font-medium text-white border border-white/30">
                         {t('migration.schema')}
                       </th>
-                      <th className="px-3 py-2 text-right font-medium text-foreground">
+                      <th className="px-3 py-2 text-right font-medium text-white border border-white/30">
                         {t('migration.rowCount')}
                       </th>
                     </tr>
@@ -526,10 +526,10 @@ function DataMigration({ isOpen, onClose }: DataMigrationProps) {
                     {tables.map((tbl) => (
                       <tr
                         key={tbl.name}
-                        className="border-t border-border hover:bg-muted/30 cursor-pointer transition-colors"
+                        className="border-t border-border hover:bg-muted/30 cursor-pointer transition-colors even:bg-muted/40"
                         onClick={() => handleToggleTable(tbl.name)}
                       >
-                        <td className="px-3 py-1.5">
+                        <td className="px-3 py-1.5 border">
                           <input
                             type="checkbox"
                             checked={tbl.selected}
@@ -537,9 +537,9 @@ function DataMigration({ isOpen, onClose }: DataMigrationProps) {
                             className="rounded"
                           />
                         </td>
-                        <td className="px-3 py-1.5 text-foreground">{tbl.name}</td>
-                        <td className="px-3 py-1.5 text-muted-foreground">{tbl.schema || '-'}</td>
-                        <td className="px-3 py-1.5 text-right text-muted-foreground">
+                        <td className="px-3 py-1.5 text-foreground border">{tbl.name}</td>
+                        <td className="px-3 py-1.5 text-muted-foreground border">{tbl.schema || '-'}</td>
+                        <td className="px-3 py-1.5 text-right text-muted-foreground border">
                           {tbl.rowCount !== undefined ? tbl.rowCount.toLocaleString() : '-'}
                         </td>
                       </tr>

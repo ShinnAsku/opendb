@@ -1,4 +1,4 @@
-name: Build openDB
+name: Build OpenDB
 
 on:
   push:

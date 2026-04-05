@@ -83,12 +83,12 @@ function SchemaDiffDialog({ isOpen, onClose }: SchemaDiffDialogProps) {
               } else {
                 const src = srcColMap.get(colName)!;
                 const tgt = tgtColMap.get(colName)!;
-                if (src.dataType !== tgt.dataType || src.nullable !== tgt.nullable) {
+                if (src.type !== tgt.type || src.notNull !== tgt.notNull) {
                   colDiffs.push({
                     name: colName,
                     status: "modified",
-                    sourceType: `${src.dataType}${src.nullable ? "" : " NOT NULL"}`,
-                    targetType: `${tgt.dataType}${tgt.nullable ? "" : " NOT NULL"}`,
+                    sourceType: `${src.type}${src.notNull ? " NOT NULL" : ""}`,
+                    targetType: `${tgt.type}${tgt.notNull ? " NOT NULL" : ""}`,
                   });
                 }
               }
@@ -105,7 +105,7 @@ function SchemaDiffDialog({ isOpen, onClose }: SchemaDiffDialogProps) {
 
       setDiffs(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('diff.compareFailed'));
+      setError(err instanceof Error ? err.message : (typeof err === 'string' ? err : t('diff.compareFailed')));
     } finally {
       setLoading(false);
     }
@@ -225,19 +225,19 @@ function SchemaDiffDialog({ isOpen, onClose }: SchemaDiffDialogProps) {
               </div>
 
               <div className="border border-border rounded overflow-hidden">
-                <table className="w-full text-xs">
-                  <thead className="bg-muted">
+                <table className="w-full text-xs border-collapse border">
+                  <thead style={{ backgroundColor: 'hsl(var(--tab-active))' }}>
                     <tr>
-                      <th className="px-3 py-1.5 text-left font-medium text-muted-foreground">{t('diff.tableName')}</th>
-                      <th className="px-3 py-1.5 text-left font-medium text-muted-foreground">{t('diff.status')}</th>
-                      <th className="px-3 py-1.5 text-left font-medium text-muted-foreground">{t('diff.details')}</th>
+                      <th className="px-3 py-1.5 text-left font-medium text-white border border-white/30">{t('diff.tableName')}</th>
+                      <th className="px-3 py-1.5 text-left font-medium text-white border border-white/30">{t('diff.status')}</th>
+                      <th className="px-3 py-1.5 text-left font-medium text-white border border-white/30">{t('diff.details')}</th>
                     </tr>
                   </thead>
                   <tbody>
                     {diffs.map((diff) => (
-                      <tr key={diff.name} className="border-t border-border/50">
-                        <td className="px-3 py-1.5 text-foreground font-mono">{diff.name}</td>
-                        <td className="px-3 py-1.5">
+                      <tr key={diff.name} className="border-t even:bg-muted/40">
+                        <td className="px-3 py-1.5 text-foreground font-mono border">{diff.name}</td>
+                        <td className="px-3 py-1.5 border">
                           <span className={`text-[10px] px-1.5 py-0.5 rounded ${
                             diff.status === "only_source"
                               ? "bg-destructive/10 text-destructive"
@@ -252,7 +252,7 @@ function SchemaDiffDialog({ isOpen, onClose }: SchemaDiffDialogProps) {
                               : t('diff.hasDiff')}
                           </span>
                         </td>
-                        <td className="px-3 py-1.5 text-muted-foreground">
+                        <td className="px-3 py-1.5 text-muted-foreground border">
                           {diff.columnDiffs?.map((c) => (
                             <div key={c.name} className="text-[10px]">
                               {c.status === "only_source" && `${t('diff.missingColumns')}${c.name}`}

@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul 2>&1
-title openDB - Windows Build Script
+title OpenDB - Windows Build Script
 color 0A
 
 echo ╔══════════════════════════════════════════════════╗
-echo ║          openDB v2.0 - Windows Build            ║
+echo ║          OpenDB v2.0 - Windows Build            ║
 echo ║     一键构建 Windows 安装包 (.exe/.msi)         ║
 echo ╚══════════════════════════════════════════════════╝
 echo.
@@ -134,7 +134,7 @@ echo.
 :: ============================================
 :: 构建 Tauri 应用
 :: ============================================
-echo [5/6] 构建 openDB Windows 安装包...
+echo [5/6] 构建 OpenDB Windows 安装包...
 echo 这可能需要 5-15 分钟（首次构建需要下载和编译 Rust 依赖）...
 echo.
 call pnpm tauri build
@@ -163,15 +163,15 @@ echo.
 
 set "BUILD_DIR=%~dp0src-tauri\target\release\bundle"
 
-if exist "%BUILD_DIR%\msi\openDB_0.1.0_x64_en-US.msi" (
+if exist "%BUILD_DIR%\msi\OpenDB_0.1.0_x64_en-US.msi" (
     echo [√] MSI 安装包:
-    echo     %BUILD_DIR%\msi\openDB_0.1.0_x64_en-US.msi
+    echo     %BUILD_DIR%\msi\OpenDB_0.1.0_x64_en-US.msi
     echo.
 )
 
-if exist "%BUILD_DIR%\nsis\openDB_0.1.0_x64-setup.exe" (
+if exist "%BUILD_DIR%\nsis\OpenDB_0.1.0_x64-setup.exe" (
     echo [√] NSIS 安装包 (.exe):
-    echo     %BUILD_DIR%\nsis\openDB_0.1.0_x64-setup.exe
+    echo     %BUILD_DIR%\nsis\OpenDB_0.1.0_x64-setup.exe
     echo.
 )
 

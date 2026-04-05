@@ -1,36 +1,90 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import Editor, { type OnMount, loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import {
   Play,
   AlignLeft,
   Loader2,
   ChevronRight,
-  Upload,
-  FileText,
   Database,
   RotateCcw,
   CheckCircle2,
   XCircle,
   Code2,
-  ChevronDown,
-  ChevronUp,
+  Scissors,
+  Copy,
+  ClipboardPaste,
+  MousePointerClick,
+  TextCursorInput,
 } from "lucide-react";
-import { useAppStore, type QueryResult } from "@/stores/app-store";
+import { useAppStore } from "@/stores/app-store";
+import type { QueryResult, PagedQueryResult } from "@/types";
 import { t } from "@/lib/i18n";
-import { executeQuery, executeSql } from "@/lib/tauri-commands";
+import { executeQuery, executeQueryPaged, executeSql, getTables, getSchemas, getColumns } from "@/lib/tauri-commands";
 import { exportToCSV, exportToJSON, exportToSQL, downloadFile, importFromCSV, importFromJSON } from "@/lib/export";
+import { format as formatSQL } from "sql-formatter";
 import ERDiagram from "./ERDiagram";
 import TableDesigner from "./TableDesigner";
 import QueryAnalyzer from "./QueryAnalyzer";
 
-type ResultTab = "results" | "messages" | "plan";
+// SQL keywords for autocompletion
+const SQL_KEYWORDS = [
+  "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE",
+  "CREATE", "TABLE", "ALTER", "DROP", "INDEX", "VIEW", "DATABASE", "SCHEMA",
+  "JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "CROSS", "FULL", "ON", "USING",
+  "AND", "OR", "NOT", "IN", "EXISTS", "BETWEEN", "LIKE", "ILIKE", "IS", "NULL",
+  "AS", "ORDER", "BY", "GROUP", "HAVING", "LIMIT", "OFFSET", "UNION", "ALL",
+  "DISTINCT", "CASE", "WHEN", "THEN", "ELSE", "END", "CAST", "COALESCE",
+  "COUNT", "SUM", "AVG", "MIN", "MAX", "ASC", "DESC", "NULLS", "FIRST", "LAST",
+  "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "UNIQUE", "CHECK", "DEFAULT",
+  "CONSTRAINT", "NOT", "NULL", "AUTO_INCREMENT", "SERIAL", "BIGSERIAL",
+  "INTEGER", "INT", "BIGINT", "SMALLINT", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC",
+  "VARCHAR", "CHAR", "TEXT", "BOOLEAN", "BOOL", "DATE", "TIME", "TIMESTAMP",
+  "TIMESTAMPTZ", "JSON", "JSONB", "UUID", "BYTEA", "BLOB", "CLOB",
+  "IF", "ELSE", "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "TRANSACTION",
+  "GRANT", "REVOKE", "WITH", "RECURSIVE", "RETURNING", "EXPLAIN", "ANALYZE",
+  "TRUNCATE", "CASCADE", "RESTRICT", "TRIGGER", "FUNCTION", "PROCEDURE",
+  "EXECUTE", "REPLACE", "MERGE", "UPSERT", "CONFLICT", "DO", "NOTHING",
+  "PARTITION", "OVER", "WINDOW", "ROW_NUMBER", "RANK", "DENSE_RANK",
+  "LAG", "LEAD", "FIRST_VALUE", "LAST_VALUE", "NTH_VALUE", "NTILE",
+  "FETCH", "NEXT", "ROWS", "ONLY", "PERCENT", "TOP", "PIVOT", "UNPIVOT",
+  "SHOW", "DESCRIBE", "DESC", "USE", "RENAME", "TO", "ADD", "COLUMN",
+  "MATERIALIZED", "REFRESH", "CONCURRENTLY", "LATERAL", "TABLESAMPLE",
+  "GROUPING", "SETS", "CUBE", "ROLLUP", "FILTER", "WITHIN", "ARRAY",
+];
+
+type ResultTab = "results" | "messages";
 
 // Configure Monaco Editor to use local files instead of CDN
 loader.config({ monaco });
 
+// Strip leading SQL comments (-- and /* */) to find the actual statement keyword
+function stripLeadingComments(sql: string): string {
+  let i = 0;
+  const len = sql.length;
+  while (i < len) {
+    const ch = sql.charAt(i);
+    if (/\s/.test(ch)) { i++; continue; }
+    if (ch === '-' && sql.charAt(i + 1) === '-') {
+      const nl = sql.indexOf('\n', i);
+      if (nl === -1) return '';
+      i = nl + 1;
+      continue;
+    }
+    if (ch === '/' && sql.charAt(i + 1) === '*') {
+      const end = sql.indexOf('*/', i + 2);
+      if (end === -1) return '';
+      i = end + 2;
+      continue;
+    }
+    break;
+  }
+  return sql.substring(i);
+}
+
 function isSelectQuery(sql: string): boolean {
-  const trimmed = sql.trim().toUpperCase();
+  const trimmed = stripLeadingComments(sql).trim().toUpperCase();
   return (
     trimmed.startsWith("SELECT") ||
     trimmed.startsWith("SHOW") ||
@@ -39,6 +93,133 @@ function isSelectQuery(sql: string): boolean {
     trimmed.startsWith("EXPLAIN") ||
     trimmed.startsWith("WITH")
   );
+}
+
+// Only SELECT and WITH queries should get auto-LIMIT injection
+// SHOW/DESCRIBE/EXPLAIN return small result sets, no need for pagination
+function shouldAutoLimit(sql: string): boolean {
+  const trimmed = stripLeadingComments(sql).trim().toUpperCase();
+  return trimmed.startsWith("SELECT") || trimmed.startsWith("WITH");
+}
+
+const QUERY_PAGE_SIZE = 1000;
+
+// Split SQL text into individual statements, respecting strings, comments, dollar-quotes, and BEGIN...END blocks
+function splitSqlStatements(sql: string): string[] {
+  const statements: string[] = [];
+  let current = '';
+  let i = 0;
+  const len = sql.length;
+  let blockDepth = 0;
+
+  // Check if current context is a block-creating statement (CREATE FUNCTION/PROCEDURE/TRIGGER, DO)
+  function isBlockContext(): boolean {
+    const stripped = current.replace(/--[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').toUpperCase().trim();
+    return /\b(CREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE|TRIGGER))\b/.test(stripped) ||
+           /^\s*DO\b/.test(stripped);
+  }
+
+  // Try to read a word (identifier/keyword) at position i
+  function readWord(): string | null {
+    const m = sql.substring(i).match(/^[a-zA-Z_]\w*/);
+    return m ? m[0] : null;
+  }
+
+  while (i < len) {
+    const ch = sql.charAt(i);
+
+    // Single-line comment
+    if (ch === '-' && sql.charAt(i + 1) === '-') {
+      const nl = sql.indexOf('\n', i);
+      if (nl === -1) { current += sql.substring(i); break; }
+      current += sql.substring(i, nl + 1);
+      i = nl + 1;
+      continue;
+    }
+
+    // Multi-line comment
+    if (ch === '/' && sql.charAt(i + 1) === '*') {
+      const end = sql.indexOf('*/', i + 2);
+      if (end === -1) { current += sql.substring(i); break; }
+      current += sql.substring(i, end + 2);
+      i = end + 2;
+      continue;
+    }
+
+    // String literal (single quote)
+    if (ch === "'") {
+      let j = i + 1;
+      while (j < len) {
+        if (sql.charAt(j) === "'" && sql.charAt(j + 1) === "'") { j += 2; }
+        else if (sql.charAt(j) === "'") { break; }
+        else { j++; }
+      }
+      current += sql.substring(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+
+    // Dollar-quoted string (PostgreSQL)
+    if (ch === '$') {
+      const tagMatch = sql.substring(i).match(/^\$([a-zA-Z_]*)\$/);
+      if (tagMatch) {
+        const tag = tagMatch[0];
+        const endIdx = sql.indexOf(tag, i + tag.length);
+        if (endIdx !== -1) {
+          current += sql.substring(i, endIdx + tag.length);
+          i = endIdx + tag.length;
+          continue;
+        }
+      }
+    }
+
+    // Word token - track BEGIN/END block nesting
+    if (/[a-zA-Z_]/.test(ch)) {
+      const word = readWord();
+      if (word) {
+        const upper = word.toUpperCase();
+        current += word;
+        i += word.length;
+
+        if (upper === 'BEGIN') {
+          if (blockDepth > 0 || isBlockContext()) {
+            blockDepth++;
+          }
+          // else: standalone BEGIN (transaction) - don't track
+        } else if (upper === 'END' && blockDepth > 0) {
+          blockDepth--;
+        }
+        continue;
+      }
+    }
+
+    // Semicolon - statement boundary only when not inside a BEGIN...END block
+    if (ch === ';') {
+      if (blockDepth > 0) {
+        // Inside a block - keep the semicolon as part of the statement
+        current += ch;
+        i++;
+        continue;
+      }
+      const stmt = current.trim();
+      if (stmt) { statements.push(stmt); }
+      current = '';
+      i++;
+      continue;
+    }
+
+    current += ch;
+    i++;
+  }
+
+  let lastStmt = current.trim();
+  // Filter out standalone '/' (Oracle/GaussDB block terminator)
+  if (lastStmt === '/') { lastStmt = ''; }
+  if (lastStmt) { statements.push(lastStmt); }
+
+  // Also filter out any standalone '/' statements in the array
+  return statements.filter(s => s !== '/');
+  return statements;
 }
 
 function EditorPanel() {
@@ -51,18 +232,19 @@ function EditorPanel() {
     return <WelcomeScreen />;
   }
 
-  if (activeTab.type === "er_diagram") {
+  if (activeTab.type === "er") {
     return (
       <div className="flex-1 min-h-0">
         <ERDiagram
           embedded={true}
           connectionId={activeTab.connectionId || ""}
+          schemaName={activeTab.schemaName}
         />
       </div>
     );
   }
 
-  if (activeTab.type === "schema_diff") {
+  if (activeTab.type === "diff") {
     return (
       <div className="flex items-center justify-center h-full text-xs text-muted-foreground">
         {t('layout.schemaDiffHint')}
@@ -70,17 +252,21 @@ function EditorPanel() {
     );
   }
 
-  if (activeTab.type === "table_designer") {
+  if (activeTab.type === "designer") {
+    const editTable = activeTab.tableName
+      ? { name: activeTab.tableName, schema: activeTab.schemaName }
+      : undefined;
     return (
       <div className="flex-1 min-h-0">
         <TableDesigner
           connectionId={activeTab.connectionId || ""}
+          editTable={editTable}
         />
       </div>
     );
   }
 
-  if (activeTab.type === "query_analyzer") {
+  if (activeTab.type === "analyzer") {
     const activeConnection = connections.find((c) => c.id === activeTab.connectionId);
     return (
       <div className="flex-1 min-h-0">
@@ -95,7 +281,7 @@ function EditorPanel() {
               type: "query",
               content: sql,
               connectionId: activeTab.connectionId,
-              modified: false,
+              
             });
           }}
         />
@@ -124,8 +310,6 @@ function QueryEditor() {
     addQueryHistory,
     transactionActive,
     setTransactionActive,
-    resultPanelOpen,
-    toggleResultPanel,
     toggleSnippetPanel,
     addSlowQuery,
     slowQueryThreshold,
@@ -138,15 +322,254 @@ function QueryEditor() {
   const [executionTime, setExecutionTime] = useState<number | null>(null);
   const [importPreview, setImportPreview] = useState<{ columns: string[]; rows: any[] } | null>(null);
   const [importTableName, setImportTableName] = useState("imported_data");
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [multiResults, setMultiResults] = useState<QueryResult[]>([]);
+  const [activeResultIdx, setActiveResultIdx] = useState(0);
+
+  // Scroll-to-load-more state for query results
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [loadMoreState, setLoadMoreState] = useState<Record<number, { hasMore: boolean; currentOffset: number; originalSql: string }>>({});
+
+  // Dynamic completion data: schema names, table names, column names
+  const dbSchemasRef = useRef<string[]>([]);
+  const dbTablesRef = useRef<{ name: string; schema?: string }[]>([]);
+  const dbColumnsRef = useRef<Record<string, string[]>>({});
+
+  // Connection / Database selector state
+  const [selectedConnId, setSelectedConnId] = useState<string | null>(activeConnectionId);
+  const [databaseList, setDatabaseList] = useState<string[]>([]);
+  const [selectedDatabase, setSelectedDatabase] = useState<string>("");
+  const [loadingDatabases, setLoadingDatabases] = useState(false);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const result = activeTabId ? queryResults[activeTabId] : undefined;
-  const activeConnection = connections.find((c) => c.id === activeConnectionId);
-  const isTxActive = activeConnectionId ? !!transactionActive[activeConnectionId] : false;
+  const connectedConnections = connections.filter((c: any) => c.connected);
+  const effectiveConnectionId = selectedConnId || activeConnectionId;
+  const activeConnection = connections.find((c) => c.id === effectiveConnectionId);
+  const isTxActive = effectiveConnectionId ? !!transactionActive[effectiveConnectionId] : false;
 
-  const handleEditorMount: OnMount = useCallback((editor, monaco) => {
+  // Sync selectedConnId when global activeConnectionId changes
+  useEffect(() => {
+    if (activeConnectionId) {
+      setSelectedConnId(activeConnectionId);
+    }
+  }, [activeConnectionId]);
+
+  // Fetch database list when selected connection changes
+  useEffect(() => {
+    if (!effectiveConnectionId) {
+      setDatabaseList([]);
+      setSelectedDatabase("");
+      return;
+    }
+    const conn = connections.find((c) => c.id === effectiveConnectionId);
+    if (!conn || !conn.connected) {
+      setDatabaseList([]);
+      return;
+    }
+
+    setLoadingDatabases(true);
+    if (conn.type === 'mysql') {
+      executeQuery(effectiveConnectionId, "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME").then((res) => {
+        const dbs = res.rows.map((row: any) => {
+          const val = row['SCHEMA_NAME'] || row['schema_name'] || Object.values(row)[0];
+          return String(val);
+        }).filter((v: string) => v && v !== 'undefined');
+        setDatabaseList(dbs);
+        if (conn.database && dbs.includes(conn.database)) {
+          setSelectedDatabase(conn.database);
+        } else if (dbs.length > 0 && !selectedDatabase) {
+          setSelectedDatabase(dbs[0] || "");
+        }
+      }).catch(() => setDatabaseList([])).finally(() => setLoadingDatabases(false));
+    } else {
+      getSchemas(effectiveConnectionId).then((schemas) => {
+        setDatabaseList(schemas);
+        if (schemas.includes('public')) {
+          setSelectedDatabase('public');
+        } else if (schemas.length > 0 && !selectedDatabase) {
+          setSelectedDatabase(schemas[0] || "");
+        }
+      }).catch(() => setDatabaseList([])).finally(() => setLoadingDatabases(false));
+    }
+  }, [effectiveConnectionId, connections]);
+
+  // Handle connection change
+  const handleConnectionChange = useCallback((connId: string) => {
+    setSelectedConnId(connId);
+    setSelectedDatabase("");
+    setDatabaseList([]);
+    useAppStore.getState().setActiveConnection(connId);
+  }, []);
+
+  // Handle database change
+  const handleDatabaseChange = useCallback(async (db: string) => {
+    setSelectedDatabase(db);
+    if (!effectiveConnectionId) return;
+    const conn = connections.find((c) => c.id === effectiveConnectionId);
+    if (conn?.type === 'mysql') {
+      try {
+        await executeSql(effectiveConnectionId, `USE \`${db}\``);
+      } catch (err) {
+        console.error('Failed to switch database:', err);
+      }
+    }
+  }, [effectiveConnectionId, connections]);
+
+  // Load schemas, tables, and columns for autocomplete when connection changes
+  useEffect(() => {
+    if (!effectiveConnectionId) {
+      dbSchemasRef.current = [];
+      dbTablesRef.current = [];
+      dbColumnsRef.current = {};
+      return;
+    }
+    // Load schemas
+    getSchemas(effectiveConnectionId).then((schemas) => {
+      dbSchemasRef.current = schemas;
+    }).catch(() => { dbSchemasRef.current = []; });
+    // Load tables
+    getTables(effectiveConnectionId).then((tables) => {
+      dbTablesRef.current = tables.map((t) => ({ name: t.name, schema: t.schema }));
+      // Load columns for each table (limit to first 50 tables to avoid overload)
+      const tablesToLoad = tables.slice(0, 50);
+      tablesToLoad.forEach((table) => {
+        getColumns(effectiveConnectionId, table.name, table.schema).then((cols) => {
+          dbColumnsRef.current[table.name] = cols.map((c) => c.name);
+        }).catch(() => {});
+      });
+    }).catch(() => { dbTablesRef.current = []; });
+  }, [effectiveConnectionId]);
+
+  // Clear stale editor refs when tab changes to prevent accessing disposed Monaco instances
+  useEffect(() => {
+    editorRef.current = null;
+    monacoRef.current = null;
+  }, [activeTabId]);
+
+  // Register SQL completion provider once
+  const completionDisposableRef = useRef<any>(null);
+
+  const handleEditorMount: OnMount = useCallback((editor, monacoInstance) => {
     editorRef.current = editor;
-    monacoRef.current = monaco;
+    monacoRef.current = monacoInstance;
+
+    // Custom right-click context menu
+    editor.onContextMenu((e: any) => {
+      e.event.preventDefault();
+      e.event.stopPropagation();
+      setContextMenu({ x: e.event.posx, y: e.event.posy });
+    });
+
+    // Register SQL completion provider with dynamic db objects (only once)
+    if (!completionDisposableRef.current) {
+      completionDisposableRef.current = monacoInstance.languages.registerCompletionItemProvider("sql", {
+        triggerCharacters: ['.', ' '],
+        provideCompletionItems: (model: any, position: any) => {
+          const word = model.getWordUntilPosition(position);
+          const range = {
+            startLineNumber: position.lineNumber,
+            endLineNumber: position.lineNumber,
+            startColumn: word.startColumn,
+            endColumn: word.endColumn,
+          };
+
+          // Check if typing after a dot (e.g. "schema." or "table.")
+          const textBeforeCursor = model.getValueInRange({
+            startLineNumber: position.lineNumber,
+            startColumn: 1,
+            endLineNumber: position.lineNumber,
+            endColumn: word.startColumn,
+          });
+          const dotMatch = textBeforeCursor.match(/(\w+)\.$/);
+
+          const suggestions: any[] = [];
+
+          if (dotMatch) {
+            const prefix = dotMatch[1];
+            // If prefix is a schema name, suggest tables in that schema
+            if (dbSchemasRef.current.includes(prefix)) {
+              dbTablesRef.current
+                .filter((t) => t.schema === prefix)
+                .forEach((t) => {
+                  suggestions.push({
+                    label: t.name,
+                    kind: monacoInstance.languages.CompletionItemKind.Field,
+                    insertText: t.name,
+                    detail: "Table",
+                    range,
+                  });
+                });
+            }
+            // If prefix is a table name, suggest columns
+            const cols = dbColumnsRef.current[prefix];
+            if (cols) {
+              cols.forEach((col) => {
+                suggestions.push({
+                  label: col,
+                  kind: monacoInstance.languages.CompletionItemKind.Property,
+                  insertText: col,
+                  detail: "Column",
+                  range,
+                });
+              });
+            }
+          } else {
+            // SQL keywords
+            SQL_KEYWORDS.forEach((kw) => {
+              suggestions.push({
+                label: kw,
+                kind: monacoInstance.languages.CompletionItemKind.Keyword,
+                insertText: kw,
+                range,
+                sortText: `2_${kw}`,
+              });
+            });
+            // Schema names
+            dbSchemasRef.current.forEach((schema) => {
+              suggestions.push({
+                label: schema,
+                kind: monacoInstance.languages.CompletionItemKind.Module,
+                insertText: schema,
+                detail: "Schema",
+                range,
+                sortText: `0_${schema}`,
+              });
+            });
+            // Table names
+            dbTablesRef.current.forEach((t) => {
+              suggestions.push({
+                label: t.name,
+                kind: monacoInstance.languages.CompletionItemKind.Field,
+                insertText: t.name,
+                detail: t.schema ? `Table (${t.schema})` : "Table",
+                range,
+                sortText: `1_${t.name}`,
+              });
+            });
+            // Column names (all tables)
+            const addedCols = new Set<string>();
+            Object.entries(dbColumnsRef.current).forEach(([tableName, cols]) => {
+              cols.forEach((col) => {
+                if (!addedCols.has(col)) {
+                  addedCols.add(col);
+                  suggestions.push({
+                    label: col,
+                    kind: monacoInstance.languages.CompletionItemKind.Property,
+                    insertText: col,
+                    detail: `Column (${tableName})`,
+                    range,
+                    sortText: `3_${col}`,
+                  });
+                }
+              });
+            });
+          }
+
+          return { suggestions };
+        },
+      });
+    }
   }, []);
 
   // Listen for custom events from Toolbar
@@ -173,7 +596,7 @@ function QueryEditor() {
       window.removeEventListener("opendb:execute-query", handleExecuteEvent);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTabId, activeConnectionId, result]);
+  }, [activeTabId, effectiveConnectionId, result]);
 
   const handleEditorChange = useCallback(
     (value: string | undefined) => {
@@ -184,11 +607,34 @@ function QueryEditor() {
     [activeTabId, updateTabContent]
   );
 
-  const handleExecute = useCallback(async () => {
-    if (!activeTabId || !activeConnectionId || !editorRef.current) return;
+  const handleExecute = useCallback(async (selectedOnly?: boolean) => {
+    if (!activeTabId || !effectiveConnectionId || !editorRef.current) return;
 
-    const sql = editorRef.current.getValue().trim();
-    if (!sql) return;
+    let sqlText: string;
+    try {
+      if (selectedOnly) {
+        const selection = editorRef.current.getSelection();
+        if (selection && !selection.isEmpty()) {
+          sqlText = editorRef.current.getModel()?.getValueInRange(selection)?.trim() || "";
+        } else {
+          return;
+        }
+      } else {
+        const selection = editorRef.current.getSelection();
+        if (selection && !selection.isEmpty()) {
+          sqlText = editorRef.current.getModel()?.getValueInRange(selection)?.trim() || "";
+        } else {
+          sqlText = editorRef.current.getValue().trim();
+        }
+      }
+    } catch {
+      return;
+    }
+    if (!sqlText) return;
+
+    // Split into individual statements
+    const statements = splitSqlStatements(sqlText);
+    if (statements.length === 0) return;
 
     setIsExecuting(true);
     setMessages([]);
@@ -196,111 +642,346 @@ function QueryEditor() {
     setImportPreview(null);
 
     const startTime = performance.now();
+    const allMessages: string[] = [];
+    const collectedResults: QueryResult[] = [];
+    const newLoadMoreState: Record<number, { hasMore: boolean; currentOffset: number; originalSql: string }> = {};
 
     try {
-      if (isSelectQuery(sql)) {
-        const queryResult: QueryResult = await executeQuery(activeConnectionId, sql);
-        const elapsed = performance.now() - startTime;
-        setQueryResult(activeTabId, queryResult);
-        setExecutionTime(elapsed);
-        setMessages([t('editor.querySuccess', { rows: String(queryResult.rowCount), ms: elapsed.toFixed(0) })]);
-        setResultTab("results");
+      for (let idx = 0; idx < statements.length; idx++) {
+        const sql = statements[idx]!;
+        const stmtStart = performance.now();
 
-        addQueryHistory({
-          connectionId: activeConnectionId,
-          connectionName: activeConnection?.name || t('common.unknown'),
-          sql,
-          executionTime: elapsed,
-          timestamp: Date.now(),
-          success: true,
-        });
+        if (isSelectQuery(sql)) {
+          let queryResult: QueryResult;
+          let hasMore = false;
 
-        // Check slow query threshold
-        if (elapsed >= slowQueryThreshold) {
-          addSlowQuery({
+          // Use paged API for SELECT/WITH queries (auto-LIMIT injection)
+          // For SHOW/DESCRIBE/EXPLAIN, use regular executeQuery (no LIMIT needed)
+          if (shouldAutoLimit(sql)) {
+            const pagedResult: PagedQueryResult = await executeQueryPaged(effectiveConnectionId, sql, QUERY_PAGE_SIZE, 0);
+            queryResult = pagedResult;
+            hasMore = pagedResult.hasMore;
+          } else {
+            queryResult = await executeQuery(effectiveConnectionId, sql);
+          }
+
+          const stmtElapsed = performance.now() - stmtStart;
+          const resultIdx = collectedResults.length;
+          collectedResults.push(queryResult);
+
+          // Track load-more state for this result
+          newLoadMoreState[resultIdx] = {
+            hasMore,
+            currentOffset: queryResult.rows.length,
+            originalSql: sql,
+          };
+
+          allMessages.push(
+            statements.length > 1
+              ? `[${idx + 1}/${statements.length}] ${t('editor.querySuccess', { rows: String(queryResult.rowCount), ms: stmtElapsed.toFixed(0) })}`
+              : t('editor.querySuccess', { rows: String(queryResult.rowCount), ms: stmtElapsed.toFixed(0) })
+          );
+
+          addQueryHistory({
+            connectionId: effectiveConnectionId,
             sql,
-            executionTime: elapsed,
-            timestamp: Date.now(),
-            connectionName: activeConnection?.name || t('common.unknown'),
-            connectionId: activeConnectionId,
+            duration: stmtElapsed,
+            timestamp: new Date(),
+            rowCount: queryResult.rowCount || 0,
           });
-        }
-      } else {
-        const execResult = await executeSql(activeConnectionId, sql);
-        const elapsed = performance.now() - startTime;
-        setExecutionTime(elapsed);
-        setMessages([t('editor.executeSuccess', { message: execResult.message, ms: elapsed.toFixed(0) })]);
-        setQueryResult(activeTabId, {
-          columns: [],
-          rows: [],
-          rowCount: 0,
-          executionTime: elapsed,
-        });
-        setResultTab("messages");
 
-        addQueryHistory({
-          connectionId: activeConnectionId,
-          connectionName: activeConnection?.name || t('common.unknown'),
-          sql,
-          executionTime: elapsed,
-          timestamp: Date.now(),
-          success: true,
-        });
+          if (stmtElapsed >= slowQueryThreshold) {
+            addSlowQuery({
+              sql,
+              duration: stmtElapsed,
+              timestamp: new Date(),
+              connectionId: effectiveConnectionId,
+              rowCount: queryResult.rowCount || 0,
+            });
+          }
+        } else {
+          const execResult = await executeSql(effectiveConnectionId, sql);
+          const stmtElapsed = performance.now() - stmtStart;
+          allMessages.push(
+            statements.length > 1
+              ? `[${idx + 1}/${statements.length}] ${t('editor.executeSuccess', { message: execResult.message, ms: stmtElapsed.toFixed(0) })}`
+              : t('editor.executeSuccess', { message: execResult.message, ms: stmtElapsed.toFixed(0) })
+          );
 
-        // Check slow query threshold
-        if (elapsed >= slowQueryThreshold) {
-          addSlowQuery({
+          addQueryHistory({
+            connectionId: effectiveConnectionId,
             sql,
-            executionTime: elapsed,
-            timestamp: Date.now(),
-            connectionName: activeConnection?.name || t('common.unknown'),
-            connectionId: activeConnectionId,
+            duration: stmtElapsed,
+            timestamp: new Date(),
+            rowCount: 0,
           });
+
+          if (stmtElapsed >= slowQueryThreshold) {
+            addSlowQuery({
+              sql,
+              duration: stmtElapsed,
+              timestamp: new Date(),
+              connectionId: effectiveConnectionId,
+              rowCount: 0,
+            });
+          }
         }
       }
-    } catch (err) {
-      const elapsed = performance.now() - startTime;
-      setExecutionTime(elapsed);
-      const errorMsg = err instanceof Error ? err.message : t('editor.executeFailed');
-      setMessages([t('editor.errorPrefix', { error: errorMsg })]);
-      setQueryResult(activeTabId, {
-        columns: [],
-        rows: [],
-        rowCount: 0,
-        executionTime: elapsed,
-      });
-      setResultTab("messages");
 
-      addQueryHistory({
-        connectionId: activeConnectionId,
-        connectionName: activeConnection?.name || t('common.unknown'),
-        sql,
-        executionTime: elapsed,
-        timestamp: Date.now(),
-        success: false,
-      });
+      const totalElapsed = performance.now() - startTime;
+      setExecutionTime(totalElapsed);
+      setMessages(allMessages);
+      setMultiResults(collectedResults);
+      setActiveResultIdx(0);
+      setLoadMoreState(newLoadMoreState);
+
+      if (collectedResults.length > 0) {
+        setQueryResult(activeTabId, collectedResults[0]!);
+        setResultTab("results");
+      } else {
+        setQueryResult(activeTabId, { columns: [], rows: [], rowCount: 0, duration: totalElapsed });
+        setResultTab("messages");
+      }
+    } catch (err) {
+      const totalElapsed = performance.now() - startTime;
+      setExecutionTime(totalElapsed);
+      const errorMsg = err instanceof Error ? err.message : (typeof err === 'string' ? err : t('editor.executeFailed'));
+      allMessages.push(t('editor.errorPrefix', { error: errorMsg }));
+      setMessages(allMessages);
+      setMultiResults(collectedResults);
+      setActiveResultIdx(0);
+      setLoadMoreState(newLoadMoreState);
+
+      if (collectedResults.length > 0) {
+        setQueryResult(activeTabId, collectedResults[0]!);
+      } else {
+        setQueryResult(activeTabId, { columns: [], rows: [], rowCount: 0, duration: totalElapsed });
+      }
+      setResultTab("messages");
     } finally {
       setIsExecuting(false);
     }
-  }, [activeTabId, activeConnectionId, activeConnection, setQueryResult, setIsExecuting, addQueryHistory]);
+  }, [activeTabId, effectiveConnectionId, activeConnection, setQueryResult, setIsExecuting, addQueryHistory]);
 
-  // Bind Ctrl+Enter whenever activeTabId or activeConnectionId changes
+  // Load more rows for a specific result index
+  const handleLoadMore = useCallback(async (resultIdx: number) => {
+    if (isLoadingMore || !effectiveConnectionId) return;
+    const state = loadMoreState[resultIdx];
+    if (!state || !state.hasMore) return;
+
+    setIsLoadingMore(true);
+    try {
+      const pagedResult: PagedQueryResult = await executeQueryPaged(
+        effectiveConnectionId,
+        state.originalSql,
+        QUERY_PAGE_SIZE,
+        state.currentOffset
+      );
+
+      setMultiResults(prev => {
+        const updated = [...prev];
+        if (updated[resultIdx]) {
+          const existing = updated[resultIdx];
+          updated[resultIdx] = {
+            ...existing,
+            rows: [...existing.rows, ...pagedResult.rows],
+            rowCount: existing.rows.length + pagedResult.rows.length,
+          };
+          // Update the store if this is the active result
+          if (activeTabId && activeResultIdx === resultIdx) {
+            setQueryResult(activeTabId, updated[resultIdx]);
+          }
+        }
+        return updated;
+      });
+
+      setLoadMoreState(prev => ({
+        ...prev,
+        [resultIdx]: {
+          ...state,
+          hasMore: pagedResult.hasMore,
+          currentOffset: state.currentOffset + pagedResult.rows.length,
+        },
+      }));
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      setMessages(prev => [...prev, t('editor.errorPrefix', { error: errorMsg })]);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }, [isLoadingMore, effectiveConnectionId, loadMoreState, activeTabId, activeResultIdx, setQueryResult]);
+
+  // Bind Ctrl+Enter whenever activeTabId or effectiveConnectionId changes
   useEffect(() => {
     const editor = editorRef.current;
     const monaco = monacoRef.current;
     if (!editor || !monaco) return;
-    const disposable = editor.addCommand(
-      monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter,
-      () => handleExecute()
-    );
-    return () => disposable?.dispose();
+    try {
+      const disposable = editor.addCommand(
+        monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter,
+        () => handleExecute()
+      );
+      return () => { try { disposable?.dispose(); } catch {} };
+    } catch {
+      return undefined;
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTabId, activeConnectionId, handleExecute]);
+  }, [activeTabId, effectiveConnectionId, handleExecute]);
+
+  // Context menu helpers
+  const hasSelection = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return false;
+    const selection = editor.getSelection();
+    return selection ? !selection.isEmpty() : false;
+  }, []);
+
+  const getSelectedText = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return "";
+    const selection = editor.getSelection();
+    if (!selection || selection.isEmpty()) return "";
+    return editor.getModel()?.getValueInRange(selection) || "";
+  }, []);
+
+  const handleCut = useCallback(async () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const text = getSelectedText();
+    if (!text) return;
+    try {
+      const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+      if (isTauri) {
+        const { writeText } = await import("@tauri-apps/plugin-clipboard-manager");
+        await writeText(text);
+      } else {
+        await navigator.clipboard.writeText(text);
+      }
+      // Delete selected text
+      const selection = editor.getSelection();
+      if (selection) {
+        editor.executeEdits('cut', [{
+          range: selection,
+          text: '',
+        }]);
+      }
+    } catch {
+      // fallback: use document.execCommand
+      editor.focus();
+      document.execCommand('cut');
+    }
+    editor.focus();
+  }, [getSelectedText]);
+
+  const handleCopy = useCallback(async () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const text = getSelectedText();
+    if (!text) return;
+    try {
+      const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+      if (isTauri) {
+        const { writeText } = await import("@tauri-apps/plugin-clipboard-manager");
+        await writeText(text);
+      } else {
+        await navigator.clipboard.writeText(text);
+      }
+    } catch {
+      editor.focus();
+      document.execCommand('copy');
+    }
+    editor.focus();
+  }, [getSelectedText]);
+
+  const handlePaste = useCallback(async () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    try {
+      let text: string | null = null;
+      const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+      if (isTauri) {
+        const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
+        text = await readText();
+      } else {
+        text = await navigator.clipboard.readText();
+      }
+      if (text) {
+        const selection = editor.getSelection();
+        if (selection) {
+          editor.executeEdits('paste', [{
+            range: selection,
+            text: text,
+          }]);
+        }
+      }
+    } catch {
+      editor.focus();
+      document.execCommand('paste');
+    }
+    editor.focus();
+  }, []);
+
+  const handleSelectAll = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.focus();
+    const model = editor.getModel();
+    if (model) {
+      const fullRange = model.getFullModelRange();
+      editor.setSelection(fullRange);
+    }
+  }, []);
+
+  const handleSelectCurrentStatement = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.focus();
+    const model = editor.getModel();
+    if (!model) return;
+    const position = editor.getPosition();
+    if (!position) return;
+
+    const fullText = model.getValue();
+    const offset = model.getOffsetAt(position);
+    // Find the statement boundaries (split by semicolons)
+    let start = 0;
+    let end = fullText.length;
+    const parts = fullText.split(';');
+    let currentOffset = 0;
+    for (const part of parts) {
+      const partEnd = currentOffset + part.length;
+      if (offset >= currentOffset && offset <= partEnd) {
+        start = currentOffset;
+        end = partEnd;
+        break;
+      }
+      currentOffset = partEnd + 1; // +1 for the semicolon
+    }
+    const startPos = model.getPositionAt(start);
+    const endPos = model.getPositionAt(end);
+    editor.setSelection({
+      startLineNumber: startPos.lineNumber,
+      startColumn: startPos.column,
+      endLineNumber: endPos.lineNumber,
+      endColumn: endPos.column,
+    });
+  }, []);
 
   const handleFormat = useCallback(() => {
-    if (!editorRef.current) return;
-    editorRef.current.getAction("editor.action.formatDocument")?.run();
-  }, []);
+    if (!editorRef.current || !activeTabId) return;
+    try {
+      const currentValue = editorRef.current.getValue();
+      if (!currentValue?.trim()) return;
+      const formatted = formatSQL(currentValue, {
+        language: "sql",
+        tabWidth: 2,
+        keywordCase: "upper",
+        linesBetweenQueries: 2,
+      });
+      editorRef.current.setValue(formatted);
+      updateTabContent(activeTabId, formatted);
+    } catch {}
+  }, [activeTabId, updateTabContent]);
 
   const handleExport = useCallback(
     (format: "csv" | "json" | "sql") => {
@@ -381,13 +1062,13 @@ function QueryEditor() {
       setResultTab("results");
       setMessages([t('editor.importPreview', { rows: String(data.rows.length), cols: String(data.columns.length) })]);
     } catch (err) {
-      setMessages([t('editor.importFailed', { error: err instanceof Error ? err.message : t('common.unknownError') })]);
+      setMessages([t('editor.importFailed', { error: err instanceof Error ? err.message : (typeof err === 'string' ? err : t('common.unknownError')) })]);
       setResultTab("messages");
     }
   }, []);
 
   const handleConfirmImport = useCallback(async () => {
-    if (!importPreview || !activeConnectionId || !activeTabId) return;
+    if (!importPreview || !effectiveConnectionId || !activeTabId) return;
 
     const { columns, rows } = importPreview;
     const colDefs = columns.map((c) => `"${c}"`).join(", ");
@@ -408,20 +1089,24 @@ function QueryEditor() {
 
     setIsExecuting(true);
     try {
-      await executeSql(activeConnectionId, fullSql);
+      await executeSql(effectiveConnectionId, fullSql);
       setMessages([t('editor.importSuccess', { rows: String(rows.length), table: importTableName })]);
       setImportPreview(null);
       setResultTab("messages");
     } catch (err) {
-      setMessages([t('editor.importFailed', { error: err instanceof Error ? err.message : t('common.unknownError') })]);
+      setMessages([t('editor.importFailed', { error: err instanceof Error ? err.message : (typeof err === 'string' ? err : t('common.unknownError')) })]);
       setResultTab("messages");
     } finally {
       setIsExecuting(false);
     }
-  }, [importPreview, activeConnectionId, activeTabId, importTableName, setIsExecuting]);
+  }, [importPreview, effectiveConnectionId, activeTabId, importTableName, setIsExecuting]);
 
   const handleTransaction = useCallback(async (action: "begin" | "commit" | "rollback") => {
-    if (!activeConnectionId) return;
+    if (!effectiveConnectionId) {
+      setMessages(["No active connection"]);
+      setResultTab("messages");
+      return;
+    }
 
     const sqlMap = { begin: "BEGIN", commit: "COMMIT", rollback: "ROLLBACK" };
     const labelMap: Record<string, string> = {
@@ -431,331 +1116,383 @@ function QueryEditor() {
     };
 
     try {
-      await executeSql(activeConnectionId, sqlMap[action]);
-      setTransactionActive(activeConnectionId, action === "begin");
-      setMessages([t('editor.transactionSuccess', { action: labelMap[action] || action })]);
+      const result = await executeSql(effectiveConnectionId, sqlMap[action]);
+      setTransactionActive(effectiveConnectionId, action === "begin");
+      setMessages([
+        t('editor.transactionSuccess', { action: labelMap[action] || action }),
+        `(${result.duration}ms)`,
+      ]);
       setResultTab("messages");
     } catch (err) {
-      setMessages([t('editor.transactionFailed') + `: ${err instanceof Error ? err.message : t('common.unknownError')}`]);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setMessages([`${t('editor.transactionFailed')}: ${errMsg}`]);
       setResultTab("messages");
     }
-  }, [activeConnectionId, setTransactionActive]);
+  }, [effectiveConnectionId, setTransactionActive]);
 
   if (!activeTab) {
     return <WelcomeScreen />;
   }
 
   return (
-    <div className="flex flex-col flex-1 min-h-0">
-      {/* Editor Area */}
-      <div className="flex flex-col flex-1 min-h-0">
-        {/* Editor Toolbar */}
-        <div className="flex items-center justify-between px-3 py-1.5 border-b border-border shrink-0">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">{t('editor.sqlEditor')}</span>
-            {activeConnection && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                {activeConnection.name}
-              </span>
+    <div className="flex flex-col flex-1 min-h-0 h-full">
+      {/* Navicat-style Toolbar */}
+      <div className="flex items-center justify-between px-2 py-1 border-b border-border shrink-0 bg-muted/20">
+        <div className="flex items-center gap-2">
+          {/* Connection selector */}
+          <select
+            value={effectiveConnectionId || ""}
+            onChange={(e) => handleConnectionChange(e.target.value)}
+            className="text-xs px-1.5 py-0.5 rounded border border-border bg-background text-foreground max-w-[180px] truncate focus:outline-none focus:ring-1 focus:ring-[hsl(var(--tab-active))]"
+            title={t('sidebar.connections')}
+          >
+            <option value="" disabled>{t('sidebar.connections')}</option>
+            {connectedConnections.map((conn) => (
+              <option key={conn.id} value={conn.id}>
+                {conn.name}
+              </option>
+            ))}
+          </select>
+          {/* Database / Schema selector */}
+          <select
+            value={selectedDatabase}
+            onChange={(e) => handleDatabaseChange(e.target.value)}
+            disabled={!effectiveConnectionId || databaseList.length === 0}
+            className="text-xs px-1.5 py-0.5 rounded border border-border bg-background text-foreground max-w-[160px] truncate focus:outline-none focus:ring-1 focus:ring-[hsl(var(--tab-active))] disabled:opacity-40"
+            title={activeConnection?.type === 'mysql' ? 'Database' : 'Schema'}
+          >
+            {loadingDatabases ? (
+              <option value="">Loading...</option>
+            ) : databaseList.length === 0 ? (
+              <option value="">{activeConnection?.type === 'mysql' ? 'Database' : 'Schema'}</option>
+            ) : (
+              databaseList.map((db) => (
+                <option key={db} value={db}>{db}</option>
+              ))
             )}
-            {isTxActive && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-500 animate-pulse">
-                {t('common.transactionActive')}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-1.5">
-            {executionTime !== null && (
-              <span className="text-[10px] text-muted-foreground mr-1">
-                {executionTime.toFixed(0)} ms
-              </span>
-            )}
-            {/* Transaction buttons */}
-            {activeConnectionId && (
-              <>
-                <button
-                  onClick={() => handleTransaction("begin")}
-                  disabled={isTxActive || isExecuting}
-                  className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground bg-muted hover:bg-accent rounded transition-colors disabled:opacity-40"
-                  title={t('editor.beginTransaction')}
-                >
-                  <Database size={11} />
-                  {t('editor.beginTransaction')}
-                </button>
-                <button
-                  onClick={() => handleTransaction("commit")}
-                  disabled={!isTxActive || isExecuting}
-                  className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground bg-muted hover:bg-accent rounded transition-colors disabled:opacity-40"
-                  title={t('editor.commitTransaction')}
-                >
-                  <CheckCircle2 size={11} />
-                  {t('editor.commit')}
-                </button>
-                <button
-                  onClick={() => handleTransaction("rollback")}
-                  disabled={!isTxActive || isExecuting}
-                  className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground bg-muted hover:bg-accent rounded transition-colors disabled:opacity-40"
-                  title={t('editor.rollbackTransaction')}
-                >
-                  <RotateCcw size={11} />
-                  {t('editor.rollback')}
-                </button>
-              </>
-            )}
-            <button
-              onClick={handleFormat}
-              className="flex items-center gap-1 px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground bg-muted hover:bg-accent rounded transition-colors"
-              title={t('editor.formatSql')}
-            >
-              <AlignLeft size={12} />
-              {t('editor.format')}
-            </button>
-            <button
-              onClick={toggleSnippetPanel}
-              className="flex items-center gap-1 px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground bg-muted hover:bg-accent rounded transition-colors"
-              title={t('editor.snippet')}
-            >
-              <Code2 size={12} />
-              {t('editor.snippetShort')}
-            </button>
-            <button
-              onClick={handleExecute}
-              disabled={isExecuting || !activeConnectionId}
-              className="flex items-center gap-1 px-2.5 py-0.5 text-xs bg-[hsl(var(--tab-active))] text-white rounded hover:opacity-90 transition-opacity disabled:opacity-40"
-              title={t('editor.executeQuery')}
-            >
-              {isExecuting ? (
-                <Loader2 size={12} className="animate-spin" />
-              ) : (
-                <Play size={12} />
-              )}
-              {t('common.execute')}
-            </button>
-          </div>
+          </select>
+          {isTxActive && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-500 animate-pulse">
+              {t('common.transactionActive')}
+            </span>
+          )}
         </div>
-
-        {/* Monaco Editor */}
-        <div className="flex-1 min-h-0">
-          <Editor
-            key={activeTab.id}
-            height="100%"
-            language="sql"
-            theme={theme === "dark" ? "vs-dark" : "vs"}
-            value={activeTab.content || ""}
-            onChange={handleEditorChange}
-            onMount={handleEditorMount}
-            options={{
-              minimap: { enabled: false },
-              fontSize: 13,
-              lineHeight: 20,
-              padding: { top: 8, bottom: 8 },
-              scrollBeyondLastLine: false,
-              wordWrap: "on",
-              automaticLayout: true,
-              tabSize: 2,
-              renderLineHighlight: "line",
-              suggestOnTriggerCharacters: true,
-              quickSuggestions: true,
-              folding: true,
-              lineNumbers: "on",
-              glyphMargin: false,
-              contextmenu: true,
-              scrollbar: {
-                verticalScrollbarSize: 6,
-                horizontalScrollbarSize: 6,
-              },
-            }}
-          />
+        <div className="flex items-center gap-1">
+          {executionTime !== null && (
+            <span className="text-[10px] text-muted-foreground mr-1">
+              {executionTime.toFixed(0)} ms
+            </span>
+          )}
+          {/* Transaction buttons */}
+          {effectiveConnectionId && (
+            <>
+              <button
+                onClick={() => handleTransaction("begin")}
+                disabled={isTxActive || isExecuting}
+                className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground bg-muted hover:bg-accent rounded transition-colors disabled:opacity-40"
+                title={t('editor.beginTransaction')}
+              >
+                <Database size={11} />
+                {t('editor.beginTransaction')}
+              </button>
+              <button
+                onClick={() => handleTransaction("commit")}
+                disabled={!isTxActive || isExecuting}
+                className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground bg-muted hover:bg-accent rounded transition-colors disabled:opacity-40"
+                title={t('editor.commitTransaction')}
+              >
+                <CheckCircle2 size={11} />
+                {t('editor.commit')}
+              </button>
+              <button
+                onClick={() => handleTransaction("rollback")}
+                disabled={!isTxActive || isExecuting}
+                className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground bg-muted hover:bg-accent rounded transition-colors disabled:opacity-40"
+                title={t('editor.rollbackTransaction')}
+              >
+                <RotateCcw size={11} />
+                {t('editor.rollback')}
+              </button>
+            </>
+          )}
+          <button
+            onClick={handleFormat}
+            className="flex items-center gap-1 px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground bg-muted hover:bg-accent rounded transition-colors"
+            title={t('editor.formatSql')}
+          >
+            <AlignLeft size={12} />
+            {t('editor.format')}
+          </button>
+          <button
+            onClick={toggleSnippetPanel}
+            className="flex items-center gap-1 px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground bg-muted hover:bg-accent rounded transition-colors"
+            title={t('editor.snippet')}
+          >
+            <Code2 size={12} />
+            {t('editor.snippetShort')}
+          </button>
+          <button
+            onClick={() => handleExecute()}
+            disabled={isExecuting || !effectiveConnectionId}
+            className="flex items-center gap-1 px-2.5 py-0.5 text-xs bg-[hsl(var(--tab-active))] text-white rounded hover:opacity-90 transition-opacity disabled:opacity-40"
+            title={t('editor.executeQuery')}
+          >
+            {isExecuting ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Play size={12} />
+            )}
+            {t('common.execute')}
+          </button>
         </div>
       </div>
 
-      {/* Result Panel Toggle Button */}
-      <button
-        onClick={toggleResultPanel}
-        className="flex items-center justify-center h-5 border-t border-border hover:bg-muted transition-colors shrink-0"
-        title={resultPanelOpen ? t('editor.collapseResult') : t('editor.expandResult')}
-      >
-        {resultPanelOpen ? (
-          <ChevronDown size={12} className="text-muted-foreground" />
-        ) : (
-          <ChevronUp size={12} className="text-muted-foreground" />
-        )}
-      </button>
-
-      {/* Result Panel (collapsible) */}
-      {resultPanelOpen && (
-        <div className="flex flex-col border-t border-border" style={{ height: "35%", minHeight: "100px" }}>
-          {/* Result Tab Bar */}
-          <div className="flex items-center justify-between px-3 py-1 border-b border-border shrink-0">
-            <div className="flex items-center gap-0">
-              {(["results", "messages", "plan"] as ResultTab[]).map((tab) => (
-                <button
-                  key={tab}
-                  onClick={() => setResultTab(tab)}
-                  className={`px-2.5 py-1 text-xs transition-colors ${
-                    resultTab === tab
-                      ? "text-foreground border-b-2 border-[hsl(var(--tab-active))]"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {tab === "results"
-                    ? t('editor.resultCount', { suffix: result ? ` (${result.rowCount})` : "" }) + (importPreview ? ` (${importPreview.rows.length})` : "")
-                    : tab === "messages"
-                    ? t('editor.messages')
-                    : t('editor.executionPlan')}
-                </button>
-              ))}
-            </div>
-            <div className="flex items-center gap-1">
-              {/* Import buttons */}
-              <button
-                onClick={() => handleImport("csv")}
-                disabled={isExecuting}
-                className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40"
-                title={t('toolbar.importCsv')}
-              >
-                <Upload size={10} />
-                CSV
-              </button>
-              <button
-                onClick={() => handleImport("json")}
-                disabled={isExecuting}
-                className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40"
-                title={t('toolbar.importJson')}
-              >
-                <FileText size={10} />
-                JSON
-              </button>
-              {resultTab === "results" && result && result.columns.length > 0 && (
-                <>
-                  <span className="text-border">|</span>
-                  <button
-                    onClick={() => handleExport("csv")}
-                    className="px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
-                  >
-                    CSV
-                  </button>
-                  <button
-                    onClick={() => handleExport("json")}
-                    className="px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
-                  >
-                    JSON
-                  </button>
-                  <button
-                    onClick={() => handleExport("sql")}
-                    className="px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
-                  >
-                    SQL
-                  </button>
-                </>
-              )}
-            </div>
+      {/* Resizable Editor + Result panels */}
+      <PanelGroup direction="vertical" autoSaveId="query-editor-panels" className="flex-1 min-h-0">
+        {/* SQL Editor Panel */}
+        <Panel defaultSize={60} minSize={20}>
+          <div className="h-full">
+            <Editor
+              key={activeTab.id}
+              height="100%"
+              language="sql"
+              theme={theme === "dark" ? "vs-dark" : "vs"}
+              value={activeTab.content || ""}
+              onChange={handleEditorChange}
+              onMount={handleEditorMount}
+              options={{
+                minimap: { enabled: false },
+                fontSize: 13,
+                lineHeight: 20,
+                padding: { top: 8, bottom: 8 },
+                scrollBeyondLastLine: false,
+                wordWrap: "on",
+                automaticLayout: true,
+                tabSize: 2,
+                renderLineHighlight: "line",
+                suggestOnTriggerCharacters: true,
+                quickSuggestions: true,
+                folding: true,
+                lineNumbers: "on",
+                glyphMargin: false,
+                contextmenu: false,
+                scrollbar: {
+                  verticalScrollbarSize: 6,
+                  horizontalScrollbarSize: 6,
+                },
+              }}
+            />
           </div>
 
-          {/* Import preview bar */}
-          {importPreview && (
-            <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border shrink-0 bg-muted/30">
-              <span className="text-[10px] text-muted-foreground">{t('editor.importTargetTable')}</span>
-              <input
-                type="text"
-                value={importTableName}
-                onChange={(e) => setImportTableName(e.target.value)}
-                className="px-2 py-0.5 text-xs bg-background border border-border rounded outline-none focus:border-[hsl(var(--tab-active))] text-foreground w-40"
-              />
-              <button
-                onClick={handleConfirmImport}
-                disabled={isExecuting || !importTableName.trim()}
-                className="flex items-center gap-1 px-2 py-0.5 text-[10px] bg-[hsl(var(--tab-active))] text-white rounded hover:opacity-90 transition-opacity disabled:opacity-40"
-              >
-                <CheckCircle2 size={10} />
-                {t('editor.confirmImport')}
-              </button>
-              <button
-                onClick={() => setImportPreview(null)}
-                className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
-              >
-                <XCircle size={10} />
-                {t('common.cancel')}
-              </button>
-            </div>
+          {/* Custom Context Menu */}
+          {contextMenu && (
+            <EditorContextMenu
+              x={contextMenu.x}
+              y={contextMenu.y}
+              hasSelection={hasSelection()}
+              onClose={() => setContextMenu(null)}
+              onRunAll={() => { setContextMenu(null); handleExecute(false); }}
+              onRunSelected={() => { setContextMenu(null); handleExecute(true); }}
+              onFormat={() => { setContextMenu(null); handleFormat(); }}
+              onCut={() => { setContextMenu(null); handleCut(); }}
+              onCopy={() => { setContextMenu(null); handleCopy(); }}
+              onPaste={() => { setContextMenu(null); handlePaste(); }}
+              onSelectAll={() => { setContextMenu(null); handleSelectAll(); }}
+              onSelectCurrentStatement={() => { setContextMenu(null); handleSelectCurrentStatement(); }}
+            />
           )}
+        </Panel>
 
-          {/* Result Content */}
-          <div className="flex-1 min-h-0 overflow-auto">
-            {resultTab === "results" && (
-              <ResultTable result={result} importPreview={importPreview} />
-            )}
-            {resultTab === "messages" && (
-              <div className="p-3 space-y-1">
-                {messages.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">{t('editor.noMessages')}</p>
-                ) : (
-                  messages.map((msg, i) => (
-                    <p
-                      key={i}
-                      className={`text-xs ${
-                        msg.startsWith(t('common.error')) || msg.startsWith(t('editor.importFailedShort')) || msg.startsWith(t('editor.transactionFailed'))
-                          ? "text-destructive"
-                          : "text-muted-foreground"
+        {/* Resize Handle */}
+        <PanelResizeHandle className="h-px bg-border hover:bg-[hsl(var(--tab-active))] transition-colors cursor-row-resize" />
+
+        {/* Result Panel */}
+        <Panel defaultSize={40} minSize={10}>
+          <div className="flex flex-col h-full">
+            {/* Result Tab Bar */}
+            <div className="flex items-center justify-between px-2 py-0.5 border-b border-border shrink-0 bg-muted/20">
+              <div className="flex items-center gap-0">
+                {/* Multi-result tabs when multiple SELECT results exist */}
+                {multiResults.length > 1 ? (
+                  <>
+                    {multiResults.map((r, idx) => (
+                      <button
+                        key={`result-${idx}`}
+                        onClick={() => {
+                          setActiveResultIdx(idx);
+                          if (activeTabId) setQueryResult(activeTabId, r);
+                          setResultTab("results");
+                        }}
+                        className={`px-2.5 py-1 text-xs transition-colors ${
+                          resultTab === "results" && activeResultIdx === idx
+                            ? "text-foreground border-b-2 border-[hsl(var(--tab-active))]"
+                            : "text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        {`${t('editor.resultCount', { suffix: '' })} ${idx + 1} (${r.rowCount}${loadMoreState[idx]?.hasMore ? '+' : ''})`}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setResultTab("messages")}
+                      className={`px-2.5 py-1 text-xs transition-colors ${
+                        resultTab === "messages"
+                          ? "text-foreground border-b-2 border-[hsl(var(--tab-active))]"
+                          : "text-muted-foreground hover:text-foreground"
                       }`}
                     >
-                      {msg}
-                    </p>
+                      {t('editor.messages')}
+                    </button>
+                  </>
+                ) : (
+                  (["results", "messages"] as ResultTab[]).map((tab) => (
+                    <button
+                      key={tab}
+                      onClick={() => setResultTab(tab)}
+                      className={`px-2.5 py-1 text-xs transition-colors ${
+                        resultTab === tab
+                          ? "text-foreground border-b-2 border-[hsl(var(--tab-active))]"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {tab === "results"
+                        ? t('editor.resultCount', { suffix: result ? ` (${result.rowCount})` : "" }) + (importPreview ? ` (${importPreview.rows.length})` : "")
+                        : t('editor.messages')}
+                    </button>
                   ))
                 )}
               </div>
+              <div className="flex items-center gap-1">
+                {/* Export buttons */}
+                {resultTab === "results" && result && result.columns.length > 0 && (
+                  <>
+                    <button
+                      onClick={() => handleExport("csv")}
+                      className="px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+                    >
+                      CSV
+                    </button>
+                    <button
+                      onClick={() => handleExport("json")}
+                      className="px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+                    >
+                      JSON
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Import preview bar */}
+            {importPreview && (
+              <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border shrink-0 bg-muted/30">
+                <span className="text-[10px] text-muted-foreground">{t('editor.importTargetTable')}</span>
+                <input
+                  type="text"
+                  value={importTableName}
+                  onChange={(e) => setImportTableName(e.target.value)}
+                  className="px-2 py-0.5 text-xs bg-background border border-border rounded outline-none focus:border-[hsl(var(--tab-active))] text-foreground w-40"
+                />
+                <button
+                  onClick={handleConfirmImport}
+                  disabled={isExecuting || !importTableName.trim()}
+                  className="flex items-center gap-1 px-2 py-0.5 text-[10px] bg-[hsl(var(--tab-active))] text-white rounded hover:opacity-90 transition-opacity disabled:opacity-40"
+                >
+                  <CheckCircle2 size={10} />
+                  {t('editor.confirmImport')}
+                </button>
+                <button
+                  onClick={() => setImportPreview(null)}
+                  className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+                >
+                  <XCircle size={10} />
+                  {t('common.cancel')}
+                </button>
+              </div>
             )}
-            {resultTab === "plan" && (
-              <EmbeddedExplainPanel
-                connectionId={activeConnectionId}
-                dbType={activeConnection?.type || "postgresql"}
-                currentSql={activeTab?.content || ""}
-              />
-            )}
+
+            {/* Result Content */}
+            <div className="flex-1 min-h-0">
+              {resultTab === "results" && (
+                <ResultTable
+                  result={result}
+                  importPreview={importPreview}
+                  hasMore={loadMoreState[activeResultIdx]?.hasMore ?? false}
+                  isLoadingMore={isLoadingMore}
+                  onLoadMore={() => handleLoadMore(activeResultIdx)}
+                />
+              )}
+              {resultTab === "messages" && (
+                <div className="p-3 space-y-1">
+                  {messages.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">{t('editor.noMessages')}</p>
+                  ) : (
+                    messages.map((msg, i) => (
+                      <p
+                        key={i}
+                        className={`text-xs ${
+                          msg.startsWith(t('common.error')) || msg.startsWith(t('editor.importFailedShort')) || msg.startsWith(t('editor.transactionFailed'))
+                            ? "text-destructive"
+                            : "text-muted-foreground"
+                        }`}
+                      >
+                        {msg}
+                      </p>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ===== Embedded Explain Panel (for the "plan" tab in result panel) =====
-
-function EmbeddedExplainPanel({
-  connectionId,
-  dbType,
-  currentSql,
-}: {
-  connectionId: string | null;
-  dbType: string;
-  currentSql: string;
-}) {
-  return (
-    <div className="h-full">
-      <QueryAnalyzer
-        connectionId={connectionId}
-        dbType={dbType}
-        initialSql={currentSql}
-        embedded={true}
-      />
+        </Panel>
+      </PanelGroup>
     </div>
   );
 }
 
 // ===== Result Table =====
 
-function ResultTable({ result, importPreview }: { result?: QueryResult; importPreview?: { columns: string[]; rows: any[] } | null }) {
+interface ResultTableProps {
+  result?: QueryResult;
+  importPreview?: { columns: string[]; rows: any[] } | null;
+  hasMore: boolean;
+  isLoadingMore: boolean;
+  onLoadMore: () => void;
+}
+
+function ResultTable({ result, importPreview, hasMore, isLoadingMore, onLoadMore }: ResultTableProps) {
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
+  // IntersectionObserver for scroll-to-load-more
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    const scrollContainer = scrollContainerRef.current;
+    if (!sentinel || !scrollContainer) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && hasMore && !isLoadingMore) {
+          onLoadMore();
+        }
+      },
+      { root: scrollContainer, rootMargin: '200px', threshold: 0 }
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMore, isLoadingMore, onLoadMore]);
+
   if (importPreview) {
     const { columns, rows } = importPreview;
     return (
-      <div className="overflow-auto h-full">
-        <table className="w-full text-xs border-collapse">
+      <div className="h-full overflow-auto">
+        <table className="w-full text-xs border-collapse border">
           <thead className="sticky top-0 z-10">
-            <tr className="bg-muted">
-              {columns.map((col) => (
+            <tr style={{ backgroundColor: 'hsl(var(--tab-active))' }}>
+              {columns.map((col: any) => (
                 <th
                   key={col}
-                  className="px-3 py-1.5 text-left font-medium text-muted-foreground whitespace-nowrap border-b border-border"
+                  className="px-3 py-1.5 text-left font-medium text-white whitespace-nowrap border border-white/40"
                 >
                   {col}
                 </th>
@@ -763,15 +1500,15 @@ function ResultTable({ result, importPreview }: { result?: QueryResult; importPr
             </tr>
           </thead>
           <tbody>
-            {rows.slice(0, 100).map((row, rowIdx) => (
+            {rows.map((row, rowIdx) => (
               <tr
                 key={rowIdx}
-                className="border-b border-border/50 hover:bg-muted/50 transition-colors"
+                className="hover:bg-accent transition-colors even:bg-muted/60"
               >
-                {columns.map((col) => (
+                {columns.map((col: any) => (
                   <td
                     key={col}
-                    className="px-3 py-1 whitespace-nowrap max-w-[300px] truncate"
+                    className="px-3 py-1 whitespace-nowrap max-w-[300px] truncate border"
                   >
                     <span className="text-foreground">
                       {row[col] === null || row[col] === undefined ? "NULL" : String(row[col])}
@@ -782,11 +1519,6 @@ function ResultTable({ result, importPreview }: { result?: QueryResult; importPr
             ))}
           </tbody>
         </table>
-        {rows.length > 100 && (
-          <div className="flex items-center justify-center py-2 text-[10px] text-muted-foreground">
-            {t('editor.showingRows', { total: String(rows.length) })}
-          </div>
-        )}
       </div>
     );
   }
@@ -802,56 +1534,72 @@ function ResultTable({ result, importPreview }: { result?: QueryResult; importPr
   const { columns, rows } = result;
 
   return (
-    <div className="overflow-auto h-full">
-      <table className="w-full text-xs border-collapse">
-        <thead className="sticky top-0 z-10">
-          <tr className="bg-muted">
-            {columns.map((col) => (
-              <th
-                key={col.name}
-                className="px-3 py-1.5 text-left font-medium text-muted-foreground whitespace-nowrap border-b border-border"
-              >
-                <div className="flex items-center gap-1">
-                  <span>{col.name}</span>
-                  {col.isPrimaryKey && (
-                    <span className="text-[9px] px-0.5 rounded bg-[hsl(var(--tab-active))]/20 text-[hsl(var(--tab-active))]">
-                      PK
-                    </span>
-                  )}
-                </div>
-                <span className="text-[10px] font-normal text-muted-foreground/60 block">
-                  {col.dataType}
-                  {col.nullable ? "" : " NOT NULL"}
-                </span>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, rowIdx) => (
-            <tr
-              key={rowIdx}
-              className="border-b border-border/50 hover:bg-muted/50 transition-colors"
-            >
-              {columns.map((col) => (
-                <td
+    <div className="flex flex-col h-full">
+      <div ref={scrollContainerRef} className="flex-1 overflow-auto min-h-0">
+        <table className="w-full text-xs border-collapse border">
+          <thead className="sticky top-0 z-10">
+            <tr style={{ backgroundColor: 'hsl(var(--tab-active))' }}>
+              {columns.map((col: any) => (
+                <th
                   key={col.name}
-                  className="px-3 py-1 whitespace-nowrap max-w-[300px] truncate"
+                  className="px-3 py-1.5 text-left font-medium text-white whitespace-nowrap border border-white/40"
                 >
-                  <span className={row[col.name] === null ? "text-muted-foreground/40 italic" : "text-foreground"}>
-                    {row[col.name] === null ? "NULL" : String(row[col.name])}
-                  </span>
-                </td>
+                  <div className="flex items-center gap-1">
+                    <span>{col.name}</span>
+                    {col.isPrimaryKey && (
+                      <span className="text-[9px] px-0.5 rounded bg-white/20 text-white">
+                        PK
+                      </span>
+                    )}
+                  </div>
+                </th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
-      {rows.length === 0 && (
-        <div className="flex items-center justify-center py-8 text-xs text-muted-foreground">
-          {t('editor.noResults')}
-        </div>
-      )}
+          </thead>
+          <tbody>
+            {rows.map((row: any, rowIdx: number) => (
+              <tr
+                key={rowIdx}
+                className="hover:bg-accent transition-colors even:bg-muted/60"
+              >
+                {columns.map((col: any) => (
+                  <td
+                    key={col.name}
+                    className="px-3 py-1 whitespace-nowrap max-w-[300px] truncate border"
+                  >
+                    <span className={row[col.name] === null ? "text-muted-foreground/40 italic" : "text-foreground"}>
+                      {row[col.name] === null ? "NULL" : String(row[col.name])}
+                    </span>
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {rows.length === 0 && (
+          <div className="flex items-center justify-center py-8 text-xs text-muted-foreground">
+            {t('editor.noResults')}
+          </div>
+        )}
+        {/* Sentinel for IntersectionObserver */}
+        <div ref={sentinelRef} className="h-1" />
+        {/* Loading / status indicator */}
+        {isLoadingMore && (
+          <div className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground">
+            <Loader2 size={14} className="animate-spin" />
+            {t('scroll.loadingMore')}
+          </div>
+        )}
+      </div>
+      {/* Bottom status bar */}
+      <div className="flex items-center px-3 py-1 border-t border-border shrink-0 bg-muted/20 text-[11px] text-muted-foreground">
+        {hasMore
+          ? t('scroll.rowsLoaded', { count: String(rows.length) })
+          : rows.length > 0
+            ? t('scroll.allLoaded', { count: String(rows.length) })
+            : null
+        }
+      </div>
     </div>
   );
 }
@@ -884,7 +1632,7 @@ function WelcomeScreen() {
           <path d="M12 6 C11 4, 9 3, 8 2" />
           <path d="M12 6 C13 4, 15 3, 16 2" />
         </svg>
-        <h2 className="text-base font-medium text-foreground/60">openDB</h2>
+        <h2 className="text-base font-medium text-foreground/60">OpenDB</h2>
         <p className="text-xs text-muted-foreground/60 text-center max-w-[240px]">
           {t('welcome.description')}{" "}
           <kbd className="px-1 py-0.5 bg-muted rounded text-[10px]">Ctrl+N</kbd>{" "}
@@ -897,7 +1645,7 @@ function WelcomeScreen() {
                 title: t('welcome.query1'),
                 type: "query",
                 content: "",
-                modified: false,
+
               })
             }
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-accent hover:bg-muted rounded transition-colors text-foreground"
@@ -919,3 +1667,119 @@ function WelcomeScreen() {
 }
 
 export default EditorPanel;
+
+// ===== Editor Context Menu (Navicat-style) =====
+
+// Platform-adaptive modifier key
+const isMac = typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
+const modKey = isMac ? '⌘' : 'Ctrl+';
+
+interface EditorContextMenuProps {
+  x: number;
+  y: number;
+  hasSelection: boolean;
+  onClose: () => void;
+  onRunAll: () => void;
+  onRunSelected: () => void;
+  onFormat: () => void;
+  onCut: () => void;
+  onCopy: () => void;
+  onPaste: () => void;
+  onSelectAll: () => void;
+  onSelectCurrentStatement: () => void;
+}
+
+function EditorContextMenu({
+  x,
+  y,
+  hasSelection,
+  onClose,
+  onRunAll,
+  onRunSelected,
+  onFormat,
+  onCut,
+  onCopy,
+  onPaste,
+  onSelectAll,
+  onSelectCurrentStatement,
+}: EditorContextMenuProps) {
+  // Adjust position to stay within viewport
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ x, y });
+
+  useEffect(() => {
+    if (menuRef.current) {
+      const rect = menuRef.current.getBoundingClientRect();
+      let adjustedX = x;
+      let adjustedY = y;
+      if (x + rect.width > window.innerWidth) {
+        adjustedX = window.innerWidth - rect.width - 4;
+      }
+      if (y + rect.height > window.innerHeight) {
+        adjustedY = window.innerHeight - rect.height - 4;
+      }
+      setPos({ x: adjustedX, y: adjustedY });
+    }
+  }, [x, y]);
+
+  const menuItem = (
+    label: string,
+    onClick: () => void,
+    icon: React.ReactNode,
+    shortcut?: string,
+    disabled?: boolean,
+    highlight?: boolean
+  ) => (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors disabled:opacity-40 disabled:cursor-default ${
+        highlight
+          ? "bg-[hsl(var(--tab-active))] text-white hover:opacity-90"
+          : "hover:bg-muted"
+      }`}
+    >
+      <span className="w-4 flex items-center justify-center">{icon}</span>
+      <span className="flex-1 text-left">{label}</span>
+      {shortcut && (
+        <span className="text-[10px] text-muted-foreground ml-4">{shortcut}</span>
+      )}
+    </button>
+  );
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50" onClick={onClose} />
+      <div
+        ref={menuRef}
+        className="fixed z-50 border border-border rounded-md shadow-lg py-1 min-w-[220px]"
+        style={{
+          left: pos.x,
+          top: pos.y,
+          backgroundColor: 'hsl(var(--popover))',
+          color: 'hsl(var(--popover-foreground))',
+        }}
+      >
+        {hasSelection
+          ? menuItem("运行已选择的", onRunSelected, <Play size={12} />, undefined, false, true)
+          : menuItem("运行", onRunAll, <Play size={12} />, `${modKey}Enter`, false, true)
+        }
+
+        <div className="border-t border-border my-1" />
+
+        {menuItem("剪切", onCut, <Scissors size={12} />, `${modKey}X`, !hasSelection)}
+        {menuItem("复制", onCopy, <Copy size={12} />, `${modKey}C`, !hasSelection)}
+        {menuItem("粘贴", onPaste, <ClipboardPaste size={12} />, `${modKey}V`)}
+
+        <div className="border-t border-border my-1" />
+
+        {menuItem("格式化 SQL", onFormat, <AlignLeft size={12} />)}
+
+        <div className="border-t border-border my-1" />
+
+        {menuItem("选择当前语句", onSelectCurrentStatement, <TextCursorInput size={12} />)}
+        {menuItem("全选", onSelectAll, <MousePointerClick size={12} />, `${modKey}A`)}
+      </div>
+    </>
+  );
+}

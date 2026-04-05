@@ -15,6 +15,7 @@ function StatusBar() {
     mssql: "MSSQL",
     clickhouse: "ClickHouse",
     gaussdb: "GaussDB",
+    opengauss: "openGauss",
   };
 
   return (
@@ -41,10 +42,10 @@ function StatusBar() {
       <div className="flex items-center gap-3">
         {isExecuting && <span className="text-yellow-500">{t('status.executing')}</span>}
         {result && !isExecuting && result.rowCount > 0 && (
-          <span>{result.rowCount} {t('status.rows')} | {result.executionTime.toFixed(0)}ms</span>
+          <span>{result.rowCount} {t('status.rows')} | {result.duration.toFixed(0)}ms</span>
         )}
         {result && !isExecuting && result.rowCount === 0 && (
-          <span>{result.executionTime.toFixed(0)}ms</span>
+          <span>{result.duration.toFixed(0)}ms</span>
         )}
         {!result && !isExecuting && <span>{t('status.ready')}</span>}
       </div>

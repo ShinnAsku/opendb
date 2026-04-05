@@ -1,5 +1,5 @@
 import Papa from "papaparse";
-import type { ColumnInfo } from "@/stores/app-store";
+import type { ColumnInfo } from "@/types";
 
 /**
  * Export query results to CSV format
@@ -137,4 +137,122 @@ export async function importFromJSON(file: File): Promise<{ columns: string[]; r
   }
   const columns = Object.keys(arr[0]);
   return { columns, rows: arr };
+}
+
+/**
+ * Build a WHERE clause for UPDATE/DELETE operations.
+ * Uses primary key columns if available, otherwise falls back to all columns.
+ */
+export function buildWhereClause(
+  columns: { name: string; isPrimaryKey?: boolean }[],
+  row: Record<string, any>
+): string {
+  const pkCols = columns.filter((c) => c.isPrimaryKey);
+  const targetCols = pkCols.length > 0 ? pkCols : columns;
+
+  const conditions = targetCols.map((col) => {
+    const val = row[col.name];
+    if (val === null || val === undefined) {
+      return `${col.name} IS NULL`;
+    }
+    if (typeof val === "number" || typeof val === "bigint") {
+      return `${col.name} = ${val}`;
+    }
+    if (typeof val === "boolean") {
+      return `${col.name} = ${val ? "TRUE" : "FALSE"}`;
+    }
+    return `${col.name} = '${String(val).replace(/'/g, "''")}'`;
+  });
+
+  return conditions.join(" AND ");
+}
+
+/**
+ * Generate a copy table name like "table_copy1", "table_copy2", etc.
+ * Checks existing table names to find the next available number.
+ */
+export function generateCopyTableName(originalName: string, existingNames: string[]): string {
+  const lowerNames = new Set(existingNames.map(n => n.toLowerCase()));
+  let i = 1;
+  while (true) {
+    const candidate = `${originalName}_copy${i}`;
+    if (!lowerNames.has(candidate.toLowerCase())) {
+      return candidate;
+    }
+    i++;
+  }
+}
+
+/**
+ * Build SQL statements for duplicating a table.
+ * Returns an array of SQL strings to execute in order.
+ * For databases needing DDL-based approach, pass the DDL string.
+ */
+export function buildDuplicateTableSQL(
+  dbType: string,
+  oldName: string,
+  newName: string,
+  schema: string | undefined,
+  includeData: boolean,
+  ddl?: string,
+): string[] {
+  const sqls: string[] = [];
+
+  if (dbType === 'postgresql' || dbType === 'gaussdb' || dbType === 'opengauss') {
+    const oldFull = schema ? `"${schema}"."${oldName}"` : `"${oldName}"`;
+    const newFull = schema ? `"${schema}"."${newName}"` : `"${newName}"`;
+    sqls.push(`CREATE TABLE ${newFull} (LIKE ${oldFull} INCLUDING ALL)`);
+    if (includeData) {
+      sqls.push(`INSERT INTO ${newFull} SELECT * FROM ${oldFull}`);
+    }
+  } else if (dbType === 'mysql') {
+    const oldFull = `\`${oldName}\``;
+    const newFull = `\`${newName}\``;
+    sqls.push(`CREATE TABLE ${newFull} LIKE ${oldFull}`);
+    if (includeData) {
+      sqls.push(`INSERT INTO ${newFull} SELECT * FROM ${oldFull}`);
+    }
+  } else if (dbType === 'sqlite') {
+    if (includeData) {
+      sqls.push(`CREATE TABLE "${newName}" AS SELECT * FROM "${oldName}"`);
+    } else {
+      if (ddl) {
+        const replaced = ddl.replace(
+          /CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?("[^"]+"|`[^`]+`|\[[^\]]+\]|\S+)/i,
+          `CREATE TABLE "${newName}"`
+        );
+        sqls.push(replaced);
+      }
+    }
+  } else if (dbType === 'mssql') {
+    if (includeData) {
+      const oldFull = schema ? `[${schema}].[${oldName}]` : `[${oldName}]`;
+      const newFull = schema ? `[${schema}].[${newName}]` : `[${newName}]`;
+      sqls.push(`SELECT * INTO ${newFull} FROM ${oldFull}`);
+    } else {
+      if (ddl) {
+        const replaced = ddl.replace(
+          /CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?("[^"]+"|`[^`]+`|\[[^\]]+\]\.?\[[^\]]+\]|\S+)/i,
+          schema ? `CREATE TABLE [${schema}].[${newName}]` : `CREATE TABLE [${newName}]`
+        );
+        sqls.push(replaced);
+      }
+    }
+  } else {
+    // ClickHouse and others: DDL-based approach
+    if (ddl) {
+      const replaced = ddl.replace(
+        /CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?("[^"]+"|`[^`]+`|\[[^\]]+\]|\S+)/i,
+        `CREATE TABLE "${newName}"`
+      );
+      sqls.push(replaced);
+    }
+    if (includeData) {
+      const oldFull = schema ? `"${schema}"."${oldName}"` : `"${oldName}"`;
+      const newFull = schema ? `"${schema}"."${newName}"` : `"${newName}"`;
+      sqls.push(`INSERT INTO ${newFull} SELECT * FROM ${oldFull}`);
+    }
+  }
+
+  return sqls;
 }

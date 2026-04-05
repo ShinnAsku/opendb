@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useCallback } from "react";
 import {
   Sun,
   Moon,
@@ -10,13 +10,11 @@ import {
   Code2,
   GitCompare,
   Network,
-  ChevronDown,
   Globe,
-  Table2,
   BarChart3,
   ArrowLeftRight,
 } from "lucide-react";
-import { useAppStore } from "@/stores/app-store";
+import { useAppStore, useTabStore } from "@/stores/app-store";
 import { t } from "@/lib/i18n";
 
 function Toolbar({
@@ -24,20 +22,21 @@ function Toolbar({
   onOpenSnippetPanel,
   onOpenSchemaDiff,
   onOpenERDiagram,
-  onOpenTableDesigner,
   onOpenQueryAnalyzer,
   onOpenDataMigration,
+  onOpenImport,
+  onOpenExport,
 }: {
   onOpenConnectionDialog: () => void;
   onOpenSnippetPanel: () => void;
   onOpenSchemaDiff: () => void;
   onOpenERDiagram: () => void;
-  onOpenTableDesigner: () => void;
   onOpenQueryAnalyzer: () => void;
   onOpenDataMigration: () => void;
+  onOpenImport: () => void;
+  onOpenExport: () => void;
 }) {
-  const { theme, toggleTheme, aiPanelOpen, toggleAIPanel, addTab, tabs, activeConnectionId, language, setLanguage } = useAppStore();
-  const [exportOpen, setExportOpen] = useState(false);
+  const { theme, toggleTheme, aiPanelOpen, toggleAIPanel, addTab, tabs, activeConnectionId, language, setLanguage, setViewModeType } = useAppStore();
 
   const handleDragStart = useCallback((_e: React.MouseEvent) => {
     try {
@@ -56,20 +55,15 @@ function Toolbar({
       type: "query",
       content: "",
       connectionId: activeConnectionId || undefined,
-      modified: false,
     });
-  }, [addTab, tabs.length, activeConnectionId]);
-
-  const handleExport = useCallback((format: "csv" | "json" | "sql") => {
-    // Dispatch custom event for EditorPanel to handle
-    window.dispatchEvent(new CustomEvent("opendb:export", { detail: { format } }));
-    setExportOpen(false);
-  }, []);
-
-  const handleImport = useCallback((type: "csv" | "json") => {
-    window.dispatchEvent(new CustomEvent("opendb:import", { detail: { type } }));
-    setExportOpen(false);
-  }, []);
+    setViewModeType("query");
+    setTimeout(() => {
+      const newActiveId = useTabStore.getState().activeTabId;
+      if (newActiveId) {
+        window.dispatchEvent(new CustomEvent('openQueryTab', { detail: { tabId: newActiveId } }));
+      }
+    }, 0);
+  }, [addTab, tabs.length, activeConnectionId, setViewModeType]);
 
   return (
     <div
@@ -80,7 +74,7 @@ function Toolbar({
       <div className="flex items-center gap-1.5 mr-2 shrink-0">
         <ButterflyIcon size={16} />
         <span className="text-xs font-semibold text-foreground tracking-tight">
-          openDB
+          OpenDB
         </span>
       </div>
 
@@ -115,55 +109,27 @@ function Toolbar({
       <div className="w-px h-4 bg-border mx-1 shrink-0" />
 
       {/* Group 2: Import / Export */}
-      <div className="flex items-center gap-0.5 relative shrink-0">
+      <div className="flex items-center gap-0.5 shrink-0">
         <ToolbarButton
           onClick={(e) => {
             e.stopPropagation();
-            handleImport("csv");
+            onOpenImport();
           }}
-          title={t('toolbar.importCsv')}
+          title={t('toolbar.import')}
         >
           <Upload size={13} />
           <span className="text-ellipsis whitespace-nowrap overflow-hidden max-w-[40px]">{t('toolbar.import')}</span>
         </ToolbarButton>
-        <div className="relative">
-          <ToolbarButton
-            onClick={(e) => {
-              e.stopPropagation();
-              setExportOpen(!exportOpen);
-            }}
-            title={t('toolbar.export')}
-          >
-            <Download size={13} />
-            <span className="text-ellipsis whitespace-nowrap overflow-hidden max-w-[40px]">{t('toolbar.export')}</span>
-            <ChevronDown size={10} />
-          </ToolbarButton>
-          {exportOpen && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={(e) => { e.stopPropagation(); setExportOpen(false); }} />
-              <div className="absolute top-full left-0 mt-1 z-50 bg-background border border-border rounded shadow-lg py-1 min-w-[100px]">
-                <button
-                  onClick={(e) => { e.stopPropagation(); handleExport("csv"); }}
-                  className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-foreground hover:bg-muted transition-colors"
-                >
-                  CSV
-                </button>
-                <button
-                  onClick={(e) => { e.stopPropagation(); handleExport("json"); }}
-                  className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-foreground hover:bg-muted transition-colors"
-                >
-                  JSON
-                </button>
-                <button
-                  onClick={(e) => { e.stopPropagation(); handleExport("sql"); }}
-                  className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-foreground hover:bg-muted transition-colors"
-                >
-                  SQL
-                </button>
-              </div>
-            </>
-          )}
-        </div>
+        <ToolbarButton
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenExport();
+          }}
+          title={t('toolbar.export')}
+        >
+          <Download size={13} />
+          <span className="text-ellipsis whitespace-nowrap overflow-hidden max-w-[40px]">{t('toolbar.export')}</span>
+        </ToolbarButton>
       </div>
 
       {/* Divider */}
@@ -200,16 +166,6 @@ function Toolbar({
         >
           <Network size={13} />
           <span className="text-ellipsis whitespace-nowrap overflow-hidden max-w-[40px]">{t('toolbar.erDiagramShort')}</span>
-        </ToolbarButton>
-        <ToolbarButton
-          onClick={(e) => {
-            e.stopPropagation();
-            onOpenTableDesigner();
-          }}
-          title={t('toolbar.tableDesigner')}
-        >
-          <Table2 size={13} />
-          <span className="text-ellipsis whitespace-nowrap overflow-hidden max-w-[50px]">{t('toolbar.tableDesignerShort')}</span>
         </ToolbarButton>
         <ToolbarButton
           onClick={(e) => {

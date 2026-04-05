@@ -1,8 +1,8 @@
 [package]
 name = "opendb"
 version = "0.1.0"
-description = "openDB - A lightweight database management tool with AI assistance"
-authors = ["openDB"]
+description = "OpenDB - A lightweight database management tool with AI assistance"
+authors = ["OpenDB"]
 license = "MIT"
 repository = ""
 edition = "2021"
@@ -23,17 +23,34 @@ tauri = { version = "2", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "sqlite", "rust_decimal"] }
+tauri-plugin-secure-storage = "1.4"
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "sqlite", "rust_decimal", "chrono", "uuid", "ipnetwork", "mac_address"] }
 rust_decimal = "1.33"
+uuid = { version = "1", features = ["serde"] }
+ipnetwork = "0.20"
+mac_address = "1"
 tokio = { version = "1", features = ["full"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 async-trait = "0.1"
 tokio-gaussdb = "0.1.0"
+tokio-opengauss = "0.1"
 native-tls = "0.2"
 tokio-native-tls = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
 tiberius = { version = "0.12", features = ["chrono"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 futures = "0.3"
+futures-util = "0.3"
 urlencoding = "2.1"
+russh = "0.50.0-beta.7"
+russh-keys = "0.50.0-beta.7"
+regex = "1.10"
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.21"
+keyring = "2.0"
+rusqlite = { version = "0.31", features = ["bundled"] }
+tauri-plugin-clipboard-manager = "2.3.2"

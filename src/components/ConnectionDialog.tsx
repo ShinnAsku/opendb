@@ -13,8 +13,10 @@ import {
   Server,
   Settings,
 } from "lucide-react";
-import { useAppStore, type Connection, type ConnectionConfig } from "@/stores/app-store";
+import { useConnectionStore } from "@/stores/modules/connection";
+import type { Connection, ConnectionConfig } from "@/types";
 import { connectDatabase, disconnectDatabase, testConnection } from "@/lib/tauri-commands";
+import { storePassword, getPassword, removePassword } from "@/lib/secure-storage";
 import { t } from "@/lib/i18n";
 
 interface ConnectionDialogProps {
@@ -28,8 +30,8 @@ const DB_TYPES: { value: Connection["type"]; label: string; port: number; color:
   { value: "mysql", label: "MySQL", port: 3306, color: "#4479A1" },
   { value: "sqlite", label: "SQLite", port: 0, color: "#44A05E" },
   { value: "mssql", label: "MSSQL", port: 1433, color: "#CC2927" },
-  { value: "gaussdb", label: "GaussDB", port: 5432, color: "#1E3A5F" },
   { value: "clickhouse", label: "ClickHouse", port: 8123, color: "#FFCC00" },
+  { value: "gaussdb", label: "GaussDB", port: 5432, color: "#FF6B00" },
 ];
 
 const TABS = [
@@ -41,7 +43,7 @@ const TABS = [
 ];
 
 function ConnectionDialog({ isOpen, onClose, editConnection }: ConnectionDialogProps) {
-  const { addConnection, updateConnection, setActiveConnection } = useAppStore();
+  const { addConnection, updateConnection, setActiveConnection } = useConnectionStore();
 
   const [activeTab, setActiveTab] = useState("general");
   const [name, setName] = useState("");
@@ -54,6 +56,7 @@ function ConnectionDialog({ isOpen, onClose, editConnection }: ConnectionDialogP
   const [database, setDatabase] = useState("");
   const [sslEnabled, setSslEnabled] = useState(false);
   const [filePath, setFilePath] = useState("");
+  const [sqliteMode, setSqliteMode] = useState<"existing" | "new">("existing");
 
   // Advanced settings
   const [sshEnabled, setSshEnabled] = useState(false);
@@ -76,17 +79,46 @@ function ConnectionDialog({ isOpen, onClose, editConnection }: ConnectionDialogP
 
   // Populate form when editing
   useEffect(() => {
+    const loadPassword = async () => {
+      if (isOpen && editConnection) {
+        const savedPassword = await getPassword(editConnection.id);
+        if (savedPassword) {
+          setPassword(savedPassword);
+        }
+      }
+    };
+
     if (isOpen) {
       if (editConnection) {
         setName(editConnection.name);
         setType(editConnection.type);
-        setHost(editConnection.host);
-        setPort(editConnection.port);
-        setUsername(editConnection.username);
+        setHost(editConnection.host || "localhost");
+        setPort(editConnection.port || 5432);
+        setUsername(editConnection.username || "root");
+        setPassword(editConnection.password || "");
         setDatabase(editConnection.database || "");
-        setSslEnabled(editConnection.sslEnabled);
+        setSslEnabled(editConnection.enableSsl || false);
         setKeepaliveInterval(editConnection.keepaliveInterval ?? 30);
         setAutoReconnect(editConnection.autoReconnect ?? true);
+        setFilePath(editConnection.filePath || editConnection.database || "");
+        loadPassword();
+        
+        // Load SSH tunnel configuration
+        if (editConnection.sshTunnel) {
+          setSshEnabled(true);
+          setSshHost(editConnection.sshTunnel.host || "");
+          setSshPort(editConnection.sshTunnel.port || 22);
+          setSshUsername(editConnection.sshTunnel.username || "");
+          setSshPassword(editConnection.sshTunnel.password || "");
+          setSshPrivateKey(editConnection.sshTunnel.privateKey || "");
+        } else {
+          setSshEnabled(false);
+          setSshHost("");
+          setSshPort(22);
+          setSshUsername("");
+          setSshPassword("");
+          setSshPrivateKey("");
+        }
       } else {
         resetForm();
       }
@@ -102,12 +134,15 @@ function ConnectionDialog({ isOpen, onClose, editConnection }: ConnectionDialogP
         // Set default username based on database type
         if (type === "clickhouse") {
           setUsername("default");
-        } else if (type === "gaussdb") {
-          setUsername("gaussdb");
         } else if (type === "postgresql") {
           setUsername("postgres");
+          setDatabase("postgres");
+        } else if (type === "gaussdb") {
+          setUsername("gaussdb");
+          setDatabase("gaussdb");
         } else {
           setUsername("root");
+          setDatabase("");
         }
       }
     }
@@ -122,10 +157,11 @@ function ConnectionDialog({ isOpen, onClose, editConnection }: ConnectionDialogP
       setHost("localhost");
       setPort(5432);
       setUsername("postgres");
-      setPassword("root");
-      setDatabase("");
+      setPassword("");
+      setDatabase("postgres");
       setSslEnabled(false);
       setFilePath("");
+      setSqliteMode("existing");
       setTestResult(null);
       setSshEnabled(false);
       setSshHost("");
@@ -148,11 +184,12 @@ function ConnectionDialog({ isOpen, onClose, editConnection }: ConnectionDialogP
     setHost("localhost");
     setPort(5432);
     setUsername("postgres");
-    setPassword("root");
+    setPassword("");
     setShowPassword(false);
-    setDatabase("");
+    setDatabase("postgres");
     setSslEnabled(false);
     setFilePath("");
+    setSqliteMode("existing");
     setTestResult(null);
     setSshEnabled(false);
     setSshHost("");
@@ -180,7 +217,7 @@ function ConnectionDialog({ isOpen, onClose, editConnection }: ConnectionDialogP
         username: isSQLite ? "" : username,
         password: isSQLite ? "" : password,
         database: isSQLite ? filePath : (database.trim() || undefined),
-        sslEnabled,
+        enableSsl: sslEnabled,
         keepaliveInterval,
         autoReconnect,
         filePath: isSQLite ? filePath : undefined,
@@ -188,17 +225,39 @@ function ConnectionDialog({ isOpen, onClose, editConnection }: ConnectionDialogP
       console.log("Testing connection with config:", config);
       const success = await testConnection(config);
       console.log("Connection test result:", success);
+      
+      // 弹窗提示测试结果
+      if (success) {
+        alert('连接测试成功！可以连接到数据库。');
+      } else {
+        alert('连接测试失败，请检查连接配置。');
+      }
+      
       setTestResult({
         success,
         message: success ? t('connection.testSuccess') : t('connection.testFailed'),
       });
+      
+      // Auto clear test result after 3 seconds
+      setTimeout(() => {
+        setTestResult(null);
+      }, 3000);
     } catch (err) {
       console.error("Connection test error:", err);
       const errorMessage = err instanceof Error ? err.message : JSON.stringify(err);
+      
+      // 弹窗提示错误信息
+      alert(`连接测试失败：${errorMessage || t('connection.testError')}`);
+      
       setTestResult({
         success: false,
         message: errorMessage || t('connection.testError'),
       });
+      
+      // Auto clear error message after 5 seconds
+      setTimeout(() => {
+        setTestResult(null);
+      }, 5000);
     } finally {
       setTesting(false);
     }
@@ -209,32 +268,67 @@ function ConnectionDialog({ isOpen, onClose, editConnection }: ConnectionDialogP
   const handleBrowse = async () => {
     const isTauri =
       typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-    if (isTauri) {
-      try {
-        const { open } = await import("@tauri-apps/plugin-dialog");
-        const selected = await open({
+    if (!isTauri) return;
+    try {
+      const dialog = await import("@tauri-apps/plugin-dialog");
+      let selected: string | null = null;
+
+      if (sqliteMode === "new") {
+        selected = await dialog.save({
+          filters: [{ name: "SQLite Database", extensions: ["db", "sqlite", "sqlite3"] }],
+          defaultPath: "new_database.db",
+        });
+      } else {
+        const result = await dialog.open({
           multiple: false,
           filters: [{ name: "SQLite Database", extensions: ["db", "sqlite", "sqlite3"] }],
         });
-        if (selected) {
-          setFilePath(selected as string);
-          // Auto-fill name from filename
-          if (!name) {
-            const filename = (selected as string).split(/[/\\]/).pop() || "";
-            setName(filename.replace(/\.(db|sqlite|sqlite3)$/, ""));
-          }
-        }
-      } catch {
-        // Fallback: just use input
+        selected = result as string | null;
       }
+
+      if (selected) {
+        setFilePath(selected);
+        if (!name) {
+          const filename = selected.split(/[/\\]/).pop() || "";
+          setName(filename.replace(/\.(db|sqlite|sqlite3)$/, ""));
+        }
+      }
+    } catch {
+      // Fallback: just use input
     }
   };
 
   const handleSave = async () => {
+    console.log('Save button clicked!');
+    
+    // Validate connection name - must be filled
+    if (!name.trim()) {
+      alert(t('connection.nameRequired'));
+      return;
+    }
+    
+    // PostgreSQL-like databases require a database name
+    if ((type === "postgresql" || type === "gaussdb") && !database.trim()) {
+      alert('PostgreSQL 类型的数据库必须指定初始数据库名称');
+      return;
+    }
+    
+    // Check for duplicate connection name
+    const existingConnections = useConnectionStore.getState().connections;
+    const duplicateName = existingConnections.find(
+      (c) => c.name.toLowerCase() === name.trim().toLowerCase() && c.id !== editConnection?.id
+    );
+    if (duplicateName) {
+      alert(t('connection.nameExists'));
+      return;
+    }
+    
     setSaving(true);
     try {
       const newId = editConnection?.id || crypto.randomUUID();
-      const connectionName = name.trim() || `Connection ${new Date().toLocaleTimeString()}`;
+      // Generate default name if not provided: {host} ({dbType})
+      const defaultName = editConnection ? name : `${host} (${type})`;
+      const connectionName = name.trim() || defaultName;
       const config: ConnectionConfig = {
             id: newId,
             name: connectionName,
@@ -244,15 +338,32 @@ function ConnectionDialog({ isOpen, onClose, editConnection }: ConnectionDialogP
             username: isSQLite ? "" : username,
             password: isSQLite ? "" : password,
             database: isSQLite ? filePath : (database.trim() || undefined),
-            sslEnabled,
+            enableSsl: sslEnabled,
             keepaliveInterval,
             autoReconnect,
             filePath: isSQLite ? filePath : undefined,
+            sshTunnel: sshEnabled ? {
+              host: sshHost,
+              port: sshPort,
+              username: sshUsername,
+              password: sshPassword || undefined,
+              privateKey: sshPrivateKey || undefined,
+            } : undefined,
         };
+      console.log('Connection config:', config);
 
-      const dbType = DB_TYPES.find((d) => d.value === type);
+      // Store password securely if not SQLite
+      if (!isSQLite && password) {
+        console.log('Storing password for:', newId);
+        await storePassword(newId, password);
+      } else if (!isSQLite && !password && editConnection) {
+        // Remove password if it's being cleared
+        console.log('Removing password for:', newId);
+        await removePassword(newId);
+      }
 
       if (editConnection) {
+        console.log('Updating existing connection:', editConnection.id);
         // If currently connected, disconnect and reconnect with new config
         if (editConnection.connected) {
           try {
@@ -274,44 +385,64 @@ function ConnectionDialog({ isOpen, onClose, editConnection }: ConnectionDialogP
           username: isSQLite ? "" : username,
           password: isSQLite ? "" : password,
           database: isSQLite ? filePath : (database.trim() || undefined),
-          sslEnabled,
+          enableSsl: sslEnabled,
           keepaliveInterval,
           autoReconnect,
-          color: dbType?.color || "#666",
+          sshTunnel: sshEnabled ? {
+            host: sshHost,
+            port: sshPort,
+            username: sshUsername,
+            password: sshPassword || undefined,
+            privateKey: sshPrivateKey || undefined,
+          } : undefined,
         });
+        console.log('Connection updated successfully');
       } else {
+        console.log('Adding new connection');
         // Try to connect
         let connected = false;
+        let detectedType: string = type;
         try {
-          await connectDatabase(config);
+          const result = await connectDatabase(config);
           connected = true;
-        } catch {
+          if (result.detectedType) {
+            detectedType = result.detectedType;
+          }
+          console.log('Connection successful, detected type:', detectedType);
+        } catch (error) {
+          console.error('Connection failed:', error);
           // Save without connecting
         }
+        console.log('Adding connection to store...');
         addConnection({
           id: newId,
           name: connectionName,
-          type,
+          type: detectedType as Connection['type'],
           host: isSQLite ? "" : host,
           port: isSQLite ? 0 : port,
           username: isSQLite ? "" : username,
           password: isSQLite ? "" : password,
           database: isSQLite ? filePath : (database.trim() || undefined),
-          sslEnabled,
+          enableSsl: sslEnabled,
           keepaliveInterval,
           autoReconnect,
           connected,
-          color: dbType?.color || "#666",
         });
+        console.log('Connection added to store');
         if (connected) {
           setActiveConnection(newId);
+          console.log('Active connection set to:', newId);
         }
       }
 
+      console.log('Closing dialog and resetting form');
       onClose();
       resetForm();
+    } catch (error) {
+      console.error('Save error:', error);
     } finally {
       setSaving(false);
+      console.log('Save operation completed');
     }
   };
 
@@ -359,23 +490,53 @@ function ConnectionDialog({ isOpen, onClose, editConnection }: ConnectionDialogP
 
             {/* SQLite file path */}
             {isSQLite ? (
-              <div className="space-y-1">
-                <label className="text-xs text-muted-foreground">{t('connection.filePath')}</label>
-                <div className="flex items-center gap-1.5">
-                  <input
-                    type="text"
-                    value={filePath}
-                    onChange={(e) => setFilePath(e.target.value)}
-                    placeholder="/path/to/database.db"
-                    className="flex-1 px-2.5 py-1.5 text-xs bg-muted border border-border rounded outline-none focus:border-[hsl(var(--tab-active))] transition-colors text-foreground placeholder:text-muted-foreground/60"
-                  />
-                  <button
-                    onClick={handleBrowse}
-                    className="p-1.5 bg-muted border border-border rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-                    title={t('connection.browse')}
-                  >
-                    <FolderOpen size={13} />
-                  </button>
+              <div className="space-y-2.5">
+                {/* Type radio buttons - Navicat style */}
+                <div className="space-y-1">
+                  <label className="text-xs text-muted-foreground">{t('connection.sqliteType')}</label>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="flex items-center gap-2 cursor-pointer text-xs text-foreground">
+                      <input
+                        type="radio"
+                        name="sqliteMode"
+                        checked={sqliteMode === "existing"}
+                        onChange={() => { setSqliteMode("existing"); setFilePath(""); }}
+                        className="accent-[hsl(var(--tab-active))]"
+                      />
+                      {t('connection.sqliteExisting')}
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer text-xs text-foreground">
+                      <input
+                        type="radio"
+                        name="sqliteMode"
+                        checked={sqliteMode === "new"}
+                        onChange={() => { setSqliteMode("new"); setFilePath(""); }}
+                        className="accent-[hsl(var(--tab-active))]"
+                      />
+                      {t('connection.sqliteNew')}
+                    </label>
+                  </div>
+                </div>
+
+                {/* Database file path */}
+                <div className="space-y-1">
+                  <label className="text-xs text-muted-foreground">{t('connection.filePath')}</label>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      value={filePath}
+                      onChange={(e) => setFilePath(e.target.value)}
+                      placeholder={sqliteMode === "new" ? t('connection.sqliteNewPlaceholder') : "/path/to/database.db"}
+                      className="flex-1 px-2.5 py-1.5 text-xs bg-muted border border-border rounded outline-none focus:border-[hsl(var(--tab-active))] transition-colors text-foreground placeholder:text-muted-foreground/60"
+                    />
+                    <button
+                      onClick={handleBrowse}
+                      className="p-1.5 bg-muted border border-border rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                      title={t('connection.browse')}
+                    >
+                      <FolderOpen size={13} />
+                    </button>
+                  </div>
                 </div>
               </div>
             ) : (
@@ -411,7 +572,7 @@ function ConnectionDialog({ isOpen, onClose, editConnection }: ConnectionDialogP
                       type="text"
                       value={username}
                       onChange={(e) => setUsername(e.target.value)}
-                      placeholder={type === "clickhouse" ? "default" : type === "gaussdb" ? "gaussdb" : type === "postgresql" ? "postgres" : "root"}
+                      placeholder={type === "clickhouse" ? "default" : type === "postgresql" ? "postgres" : type === "gaussdb" ? "gaussdb" : "root"}
                       className="w-full px-2.5 py-1.5 text-xs bg-muted border border-border rounded outline-none focus:border-[hsl(var(--tab-active))] transition-colors text-foreground placeholder:text-muted-foreground/60"
                     />
                   </div>
@@ -435,6 +596,22 @@ function ConnectionDialog({ isOpen, onClose, editConnection }: ConnectionDialogP
                     </div>
                   </div>
                 </div>
+
+                {/* Database field - shown in general tab for PG-like databases */}
+                {(type === "postgresql" || type === "gaussdb") && (
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">
+                      {t('connection.database')} <span className="text-destructive">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={database}
+                      onChange={(e) => setDatabase(e.target.value)}
+                      placeholder={type === "gaussdb" ? "gaussdb" : "postgres"}
+                      className="w-full px-2.5 py-1.5 text-xs bg-muted border border-border rounded outline-none focus:border-[hsl(var(--tab-active))] transition-colors text-foreground placeholder:text-muted-foreground/60"
+                    />
+                  </div>
+                )}
               </>
             )}
           </div>
