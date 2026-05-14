@@ -205,18 +205,17 @@ fn text_to_json_value(text: &str, type_name: &str) -> serde_json::Value {
         "bool" => serde_json::Value::Bool(text == "t" || text == "true"),
         "int2" | "int4" | "int8" | "int1" | "oid" | "smallint" | "integer" | "bigint"
         | "smallserial" | "serial" | "bigserial" => {
-            serde_json::Value::String(text.to_string())
+            text.parse::<i64>()
+                .map(|n| serde_json::json!(n))
+                .unwrap_or_else(|_| serde_json::Value::String(text.to_string()))
         }
-        "float4" | "float8" | "real" | "double precision" => {
-            if let Ok(f) = text.parse::<f64>() {
-                serde_json::Number::from_f64(f)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or_else(|| serde_json::Value::String(text.to_string()))
-            } else {
-                serde_json::Value::String(text.to_string())
-            }
+        "float4" | "float8" | "real" | "double precision" | "numeric" | "money" => {
+            text.parse::<f64>()
+                .ok()
+                .and_then(|f| serde_json::Number::from_f64(f))
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|| serde_json::Value::String(text.to_string()))
         }
-        "numeric" | "money" => serde_json::Value::String(text.to_string()),
         "json" | "jsonb" => serde_json::from_str(text)
             .unwrap_or_else(|_| serde_json::Value::String(text.to_string())),
         // Everything else: text, varchar, bpchar, bytea, date, time, timetz,
@@ -238,20 +237,8 @@ fn text_to_json_value(text: &str, type_name: &str) -> serde_json::Value {
 /// This avoids binary FromSql limitations while preserving column type info.
 macro_rules! simple_query_to_results {
     ($client:expr, $sql:expr, $sqm_row:path) => {{
-        // Phase 1: Get column type metadata via prepare (extended protocol).
-        // prepare() only parses/describes, doesn't execute. If it fails
-        // (e.g. multi-statement SQL), we fall back to "text" as data_type.
-        let col_types: Vec<(String, String)> = match $client.prepare($sql).await {
-            Ok(stmt) => stmt
-                .columns()
-                .iter()
-                .map(|c| (c.name().to_string(), c.type_().name().to_string()))
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-
-        // Phase 2: Get data via simple_query (text protocol).
-        // All values come back as Option<&str>, no FromSql needed.
+        // Use simple_query only — skip prepare() to avoid an extra network roundtrip.
+        // All column types are reported as "text" since simple_query returns text values.
         let messages = $client
             .simple_query($sql)
             .await
@@ -265,39 +252,27 @@ macro_rules! simple_query_to_results {
                     columns = row
                         .columns()
                         .iter()
-                        .enumerate()
-                        .map(|(i, c)| {
-                            let data_type = col_types
-                                .get(i)
-                                .map(|(_, t)| t.clone())
-                                .unwrap_or_else(|| "text".to_string());
-                            ColumnInfo {
-                                name: c.name().to_string(),
-                                data_type,
-                                nullable: true,
-                                is_primary_key: false,
-                                default_value: None,
-                                comment: None,
-                                character_maximum_length: None,
-                                numeric_precision: None,
-                                numeric_scale: None,
-                            }
+                        .map(|c| ColumnInfo {
+                            name: c.name().to_string(),
+                            data_type: "text".to_string(),
+                            nullable: true,
+                            is_primary_key: false,
+                            default_value: None,
+                            comment: None,
+                            character_maximum_length: None,
+                            numeric_precision: None,
+                            numeric_scale: None,
                         })
                         .collect();
                     cols_extracted = true;
                 }
                 let mut map = serde_json::Map::new();
-                for (idx, _col) in row.columns().iter().enumerate() {
-                    let col_name = row.columns()[idx].name();
-                    let type_name = col_types
-                        .get(idx)
-                        .map(|(_, t)| t.as_str())
-                        .unwrap_or("text");
+                for (idx, col) in row.columns().iter().enumerate() {
                     let value = match row.get(idx) {
-                        Some(text) => text_to_json_value(text, type_name),
+                        Some(text) => text_to_json_value(text, "text"),
                         None => serde_json::Value::Null,
                     };
-                    map.insert(col_name.to_string(), value);
+                    map.insert(col.name().to_string(), value);
                 }
                 rows.push(map);
             }
@@ -369,9 +344,12 @@ impl GaussClient {
 // Business Layer: GaussDBConnection
 // ============================================================================
 
+use tokio::task::JoinHandle;
+
 pub struct GaussDBConnection {
     client: GaussClient,
     db_type_label: DatabaseType,
+    bg_tasks: Vec<JoinHandle<()>>,
 }
 
 impl GaussDBConnection {
@@ -404,11 +382,14 @@ impl GaussDBConnection {
 
         log::info!("Connecting to GaussDB/openGauss at {}:{}", host, port);
 
+        let mut bg_tasks = Vec::new();
+
         // Try tokio_gaussdb first, fall back to tokio_opengauss on failure
         let client =
             match Self::try_connect_gaussdb(&connection_string, config.ssl_enabled).await {
-                Ok(c) => {
+                Ok((c, handle)) => {
                     log::info!("Connected via tokio_gaussdb driver");
+                    bg_tasks.push(handle);
                     GaussClient::GaussDB(c)
                 }
                 Err(gaussdb_err) => {
@@ -418,8 +399,9 @@ impl GaussDBConnection {
                     );
                     match Self::try_connect_opengauss(&connection_string, config.ssl_enabled).await
                     {
-                        Ok(c) => {
+                        Ok((c, handle)) => {
                             log::info!("Connected via tokio_opengauss driver");
+                            bg_tasks.push(handle);
                             GaussClient::OpenGauss(c)
                         }
                         Err(og_err) => {
@@ -443,13 +425,14 @@ impl GaussDBConnection {
         Ok(Self {
             client,
             db_type_label,
+            bg_tasks,
         })
     }
 
     async fn try_connect_gaussdb(
         conn_str: &str,
         ssl: bool,
-    ) -> Result<tokio_gaussdb::Client, String> {
+    ) -> Result<(tokio_gaussdb::Client, JoinHandle<()>), String> {
         if ssl {
             let tls_connector =
                 native_tls::TlsConnector::new().map_err(|e| format!("TLS error: {}", e))?;
@@ -458,29 +441,29 @@ impl GaussDBConnection {
                 tokio_gaussdb::connect(conn_str, tls)
                     .await
                     .map_err(|e| e.to_string())?;
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 if let Err(e) = connection.await {
                     log::error!("tokio_gaussdb connection task error: {}", e);
                 }
             });
-            Ok(client)
+            Ok((client, handle))
         } else {
             let (client, connection) = tokio_gaussdb::connect(conn_str, tokio_gaussdb::NoTls)
                 .await
                 .map_err(|e| e.to_string())?;
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 if let Err(e) = connection.await {
                     log::error!("tokio_gaussdb connection task error: {}", e);
                 }
             });
-            Ok(client)
+            Ok((client, handle))
         }
     }
 
     async fn try_connect_opengauss(
         conn_str: &str,
         ssl: bool,
-    ) -> Result<tokio_opengauss::Client, String> {
+    ) -> Result<(tokio_opengauss::Client, JoinHandle<()>), String> {
         if ssl {
             let tls_connector =
                 native_tls::TlsConnector::new().map_err(|e| format!("TLS error: {}", e))?;
@@ -488,23 +471,23 @@ impl GaussDBConnection {
             let (client, connection) = tokio_opengauss::connect(conn_str, tls)
                 .await
                 .map_err(|e| e.to_string())?;
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 if let Err(e) = connection.await {
                     log::error!("tokio_opengauss connection task error: {}", e);
                 }
             });
-            Ok(client)
+            Ok((client, handle))
         } else {
             let (client, connection) =
                 tokio_opengauss::connect(conn_str, tokio_opengauss::NoTls)
                     .await
                     .map_err(|e| e.to_string())?;
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 if let Err(e) = connection.await {
                     log::error!("tokio_opengauss connection task error: {}", e);
                 }
             });
-            Ok(client)
+            Ok((client, handle))
         }
     }
 
@@ -804,8 +787,9 @@ impl DatabaseConnection for GaussDBConnection {
             "Closing GaussDB/openGauss connection (driver: {})",
             self.client.driver_name()
         );
-        // Client is dropped when GaussDBConnection is dropped,
-        // which signals the background connection task to stop.
+        for handle in &self.bg_tasks {
+            handle.abort();
+        }
     }
 
     async fn get_views(&self, schema: Option<&str>) -> Result<Vec<TableInfo>, DbError> {
@@ -958,10 +942,12 @@ impl DatabaseConnection for GaussDBConnection {
         updates: &[(String, serde_json::Value)],
         where_clause: &str,
     ) -> Result<ExecuteResult, DbError> {
+        crate::db::trait_def::sanitize_where_clause(where_clause)
+            .map_err(|e| DbError::QueryError(e))?;
         let full_table = gaussdb_full_table(table, schema);
         let set_clauses: Vec<String> = updates
             .iter()
-            .map(|(col, val)| format!("{} = {}", col, json_value_to_sql(val)))
+            .map(|(col, val)| format!("\"{}\" = {}", col.replace('"', "\"\""), json_value_to_sql(val)))
             .collect();
         let sql = format!(
             "UPDATE {} SET {} WHERE {}",
@@ -979,7 +965,9 @@ impl DatabaseConnection for GaussDBConnection {
         values: &[(String, serde_json::Value)],
     ) -> Result<ExecuteResult, DbError> {
         let full_table = gaussdb_full_table(table, schema);
-        let columns: Vec<&str> = values.iter().map(|(c, _)| c.as_str()).collect();
+        let columns: Vec<String> = values.iter()
+            .map(|(c, _)| format!("\"{}\"", c.replace('"', "\"\"")))
+            .collect();
         let value_strs: Vec<String> =
             values.iter().map(|(_, val)| json_value_to_sql(val)).collect();
         let sql = format!(
@@ -997,6 +985,8 @@ impl DatabaseConnection for GaussDBConnection {
         schema: Option<&str>,
         where_clause: &str,
     ) -> Result<ExecuteResult, DbError> {
+        crate::db::trait_def::sanitize_where_clause(where_clause)
+            .map_err(|e| DbError::QueryError(e))?;
         let full_table = gaussdb_full_table(table, schema);
         let sql = format!("DELETE FROM {} WHERE {}", full_table, where_clause);
         self.execute_sql(&sql).await

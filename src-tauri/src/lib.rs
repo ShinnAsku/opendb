@@ -1,10 +1,11 @@
 mod ai;
-mod commands;
 mod connection_store;
 mod db;
 mod plugins;
 mod rpc;
 mod ssh;
+#[cfg(any(test, feature = "stress-testing"))]
+mod testing;
 
 use connection_store::ConnectionStore;
 use db::manager::ConnectionManager;
@@ -81,6 +82,7 @@ pub async fn run() {
             db::commands::get_tables,
             db::commands::get_columns,
             db::commands::get_schemas,
+            db::commands::get_schemas_for_database,
             db::commands::get_databases,
             db::commands::test_connection_cmd,
             db::commands::export_table_sql,

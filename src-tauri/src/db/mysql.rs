@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures::StreamExt;
 use rust_decimal::Decimal;
 use sqlx::{Column, Row, TypeInfo};
 use std::time::{Duration, Instant};
@@ -189,9 +190,9 @@ impl DatabaseConnection for MySqlConnection {
                 let value = match type_name {
                     "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" => {
                         if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else if let Ok(v) = row.try_get::<i64, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else if let Ok(Some(v)) = row.try_get::<Option<String>, _>(col.name()) {
                             serde_json::Value::String(v)
                         } else if let Ok(v) = row.try_get::<String, _>(col.name()) {
@@ -202,9 +203,9 @@ impl DatabaseConnection for MySqlConnection {
                     }
                     "FLOAT" | "DOUBLE" => {
                         if let Ok(Some(v)) = row.try_get::<Option<f64>, _>(col.name()) {
-                            serde_json::Value::from(v)
+                            serde_json::json!(v)
                         } else if let Ok(v) = row.try_get::<f64, _>(col.name()) {
-                            serde_json::Value::from(v)
+                            serde_json::json!(v)
                         } else if let Ok(Some(v)) = row.try_get::<Option<String>, _>(col.name()) {
                             serde_json::Value::String(v)
                         } else if let Ok(v) = row.try_get::<String, _>(col.name()) {
@@ -215,9 +216,9 @@ impl DatabaseConnection for MySqlConnection {
                     }
                     "DECIMAL" | "NUMERIC" => {
                         if let Ok(Some(v)) = row.try_get::<Option<Decimal>, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else if let Ok(v) = row.try_get::<Decimal, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else if let Ok(Some(v)) = row.try_get::<Option<String>, _>(col.name()) {
                             serde_json::Value::String(v)
                         } else if let Ok(v) = row.try_get::<String, _>(col.name()) {
@@ -683,6 +684,23 @@ impl DatabaseConnection for MySqlConnection {
         ))
     }
 
+    async fn query_sql_paged(
+        &self,
+        sql: &str,
+        limit: u64,
+        _offset: u64,
+    ) -> Result<(QueryResult, bool), DbError> {
+        // SQL already has LIMIT limit+1 injected — fetch_all is safe (bounded)
+        let result = self.query_sql(sql).await?;
+        let has_more = result.rows.len() as u64 > limit;
+        let rows = if has_more {
+            result.rows.into_iter().take(limit as usize).collect()
+        } else {
+            result.rows
+        };
+        Ok((QueryResult { rows, ..result }, has_more))
+    }
+
     async fn close(&self) {
         self.pool.close().await;
     }
@@ -846,6 +864,8 @@ impl DatabaseConnection for MySqlConnection {
         updates: &[(String, serde_json::Value)],
         where_clause: &str,
     ) -> Result<ExecuteResult, DbError> {
+        crate::db::trait_def::sanitize_where_clause(where_clause)
+            .map_err(|e| DbError::QueryError(e))?;
         let full_table = mysql_full_table(table, schema);
         let set_clauses: Vec<String> = updates
             .iter()
@@ -886,6 +906,8 @@ impl DatabaseConnection for MySqlConnection {
         schema: Option<&str>,
         where_clause: &str,
     ) -> Result<ExecuteResult, DbError> {
+        crate::db::trait_def::sanitize_where_clause(where_clause)
+            .map_err(|e| DbError::QueryError(e))?;
         let full_table = mysql_full_table(table, schema);
         let sql = format!("DELETE FROM {} WHERE {}", full_table, where_clause);
         self.execute_sql(&sql).await

@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import Editor, { type OnMount, loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Play,
   AlignLeft,
@@ -20,7 +21,7 @@ import {
   Brain,
   Lightbulb,
 } from "lucide-react";
-import { useAppStore } from "@/stores/app-store";
+import { useAppStore, useConnectionStore, useTabStore, useUIStore } from "@/stores/app-store";
 import type { QueryResult, PagedQueryResult } from "@/types";
 import { t } from "@/lib/i18n";
 import { executeQuery, executeQueryPaged, executeSql, getTables, getSchemas, getColumns } from "@/lib/tauri-commands";
@@ -319,7 +320,7 @@ function EditorPanel() {
               connectionId: activeTab.connectionId,
             });
             // Activate the new tab
-            useAppStore.getState().setActiveTab(newTabId);
+            useTabStore.getState().setActiveTab(newTabId);
           }}
         />
       </div>
@@ -436,7 +437,7 @@ function QueryEditor() {
     setSelectedConnId(connId);
     setSelectedDatabase("");
     setDatabaseList([]);
-    useAppStore.getState().setActiveConnection(connId);
+    useConnectionStore.getState().setActiveConnection(connId);
   }, []);
 
   // Handle database change
@@ -635,10 +636,14 @@ function QueryEditor() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId, effectiveConnectionId, result]);
 
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleEditorChange = useCallback(
     (value: string | undefined) => {
       if (activeTabId && value !== undefined) {
-        updateTabContent(activeTabId, value);
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(() => {
+          updateTabContent(activeTabId, value);
+        }, 300);
       }
     },
     [activeTabId, updateTabContent]
@@ -801,6 +806,8 @@ function QueryEditor() {
   }, [activeTabId, effectiveConnectionId, activeConnection, setQueryResult, setIsExecuting, addQueryHistory]);
 
   // Load more rows for a specific result index
+  const MAX_DISPLAY_ROWS = 50000;
+
   const handleLoadMore = useCallback(async (resultIdx: number) => {
     if (isLoadingMore || !effectiveConnectionId) return;
     const state = loadMoreState[resultIdx];
@@ -819,12 +826,19 @@ function QueryEditor() {
         const updated = [...prev];
         if (updated[resultIdx]) {
           const existing = updated[resultIdx];
-          updated[resultIdx] = {
-            ...existing,
-            rows: [...existing.rows, ...pagedResult.rows],
-            rowCount: existing.rows.length + pagedResult.rows.length,
-          };
-          // Update the store if this is the active result
+          const newTotal = existing.rows.length + pagedResult.rows.length;
+          if (newTotal > MAX_DISPLAY_ROWS) {
+            updated[resultIdx] = {
+              ...existing,
+              rowCount: Math.min(newTotal, MAX_DISPLAY_ROWS),
+            };
+          } else {
+            updated[resultIdx] = {
+              ...existing,
+              rows: [...existing.rows, ...pagedResult.rows],
+              rowCount: newTotal,
+            };
+          }
           if (activeTabId && activeResultIdx === resultIdx) {
             setQueryResult(activeTabId, updated[resultIdx]);
           }
@@ -836,7 +850,7 @@ function QueryEditor() {
         ...prev,
         [resultIdx]: {
           ...state,
-          hasMore: pagedResult.hasMore,
+          hasMore: state.currentOffset + pagedResult.rows.length < MAX_DISPLAY_ROWS && pagedResult.hasMore,
           currentOffset: state.currentOffset + pagedResult.rows.length,
         },
       }));
@@ -1269,7 +1283,7 @@ function QueryEditor() {
             {t('editor.snippetShort')}
           </button>
           <button
-            onClick={() => useAppStore.getState().toggleAIPanel()}
+            onClick={() => useUIStore.getState().toggleAIPanel()}
             className="flex items-center gap-1 px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground bg-muted hover:bg-accent rounded transition-colors"
             title="AI Assistant"
           >
@@ -1280,7 +1294,7 @@ function QueryEditor() {
             onClick={async () => {
               const sql = editorRef.current?.getValue() || '';
               if (sql) {
-                useAppStore.getState().toggleAIPanel();
+                useUIStore.getState().toggleAIPanel();
                 // Set AI input to optimize the SQL
                 setTimeout(() => {
                   const aiInput = document.querySelector('.ai-input');
@@ -1517,6 +1531,100 @@ function QueryEditor() {
   );
 }
 
+// ===== Virtualized Table Body =====
+
+function VirtualTableBody({
+  rows, columns, parentRef, virtualCount, hasMore, isLoadingMore, onLoadMore,
+}: {
+  rows: any[];
+  columns: any[];
+  parentRef: React.RefObject<HTMLDivElement | null>;
+  virtualCount: number;
+  hasMore: boolean;
+  isLoadingMore: boolean;
+  onLoadMore: () => void;
+}) {
+  const virtualizer = useVirtualizer({
+    count: virtualCount,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 28,
+    overscan: 15,
+  });
+
+  // Trigger load-more when last items come into view
+  useEffect(() => {
+    const items = virtualizer.getVirtualItems();
+    const lastItem = items[items.length - 1];
+    if (!lastItem) return;
+    const lastIdx = lastItem.index;
+    if (lastIdx >= rows.length - 5 && hasMore && !isLoadingMore) {
+      onLoadMore();
+    }
+  }, [virtualizer.getVirtualItems(), rows.length, hasMore, isLoadingMore, onLoadMore]);
+
+  return (
+    <>
+      <table className="w-full text-xs border-collapse border" style={{ tableLayout: 'fixed' }}>
+        <thead className="sticky top-0 z-10">
+          <tr style={{ backgroundColor: 'hsl(var(--tab-active))' }}>
+            {columns.map((col: any) => (
+              <th
+                key={col.name}
+                className="px-3 py-1.5 text-left font-medium text-white whitespace-nowrap border border-white/40"
+                style={{ minWidth: 120 }}
+              >
+                <div className="flex items-center gap-1">
+                  <span>{col.name}</span>
+                  {col.isPrimaryKey && (
+                    <span className="text-[9px] px-0.5 rounded bg-white/20 text-white">PK</span>
+                  )}
+                </div>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {virtualizer.getVirtualItems().map((virtualRow) => {
+            if (virtualRow.index >= rows.length) {
+              // Load-more sentinel row
+              return (
+                <tr key="sentinel" style={{ height: 28 }}>
+                  <td colSpan={columns.length} className="border">
+                    <div className="flex items-center justify-center gap-2 text-[10px] text-muted-foreground">
+                      {isLoadingMore && <Loader2 size={12} className="animate-spin" />}
+                      {isLoadingMore ? 'Loading...' : 'Scroll for more...'}
+                    </div>
+                  </td>
+                </tr>
+              );
+            }
+            const row = rows[virtualRow.index];
+            return (
+              <tr
+                key={virtualRow.key}
+                className="hover:bg-accent transition-colors even:bg-muted/60"
+                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: 28, transform: `translateY(${virtualRow.start}px)` }}
+              >
+                {columns.map((col: any) => (
+                  <td
+                    key={col.name}
+                    className="px-3 py-1 whitespace-nowrap truncate border"
+                    style={{ minWidth: 120 }}
+                  >
+                    <span className={row[col.name] === null ? "text-muted-foreground/40 italic" : "text-foreground"}>
+                      {row[col.name] === null ? "NULL" : String(row[col.name])}
+                    </span>
+                  </td>
+                ))}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </>
+  );
+}
+
 // ===== Result Table =====
 
 interface ResultTableProps {
@@ -1528,27 +1636,7 @@ interface ResultTableProps {
 }
 
 function ResultTable({ result, importPreview, hasMore, isLoadingMore, onLoadMore }: ResultTableProps) {
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const sentinelRef = useRef<HTMLDivElement>(null);
-
-  // IntersectionObserver for scroll-to-load-more
-  useEffect(() => {
-    const sentinel = sentinelRef.current;
-    const scrollContainer = scrollContainerRef.current;
-    if (!sentinel || !scrollContainer) return;
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0]?.isIntersecting && hasMore && !isLoadingMore) {
-          onLoadMore();
-        }
-      },
-      { root: scrollContainer, rootMargin: '200px', threshold: 0 }
-    );
-
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [hasMore, isLoadingMore, onLoadMore]);
+  const parentRef = useRef<HTMLDivElement>(null);
 
   if (importPreview) {
     const { columns, rows } = importPreview;
@@ -1568,7 +1656,7 @@ function ResultTable({ result, importPreview, hasMore, isLoadingMore, onLoadMore
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, rowIdx) => (
+            {rows.map((row: any, rowIdx: number) => (
               <tr
                 key={rowIdx}
                 className="hover:bg-accent transition-colors even:bg-muted/60"
@@ -1600,64 +1688,22 @@ function ResultTable({ result, importPreview, hasMore, isLoadingMore, onLoadMore
   }
 
   const { columns, rows } = result;
+  const virtualCount = rows.length + (hasMore ? 1 : 0); // extra slot for sentinel
 
   return (
     <div className="flex flex-col h-full">
-      <div ref={scrollContainerRef} className="flex-1 overflow-auto min-h-0">
-        <table className="w-full text-xs border-collapse border">
-          <thead className="sticky top-0 z-10">
-            <tr style={{ backgroundColor: 'hsl(var(--tab-active))' }}>
-              {columns.map((col: any) => (
-                <th
-                  key={col.name}
-                  className="px-3 py-1.5 text-left font-medium text-white whitespace-nowrap border border-white/40"
-                >
-                  <div className="flex items-center gap-1">
-                    <span>{col.name}</span>
-                    {col.isPrimaryKey && (
-                      <span className="text-[9px] px-0.5 rounded bg-white/20 text-white">
-                        PK
-                      </span>
-                    )}
-                  </div>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row: any, rowIdx: number) => (
-              <tr
-                key={rowIdx}
-                className="hover:bg-accent transition-colors even:bg-muted/60"
-              >
-                {columns.map((col: any) => (
-                  <td
-                    key={col.name}
-                    className="px-3 py-1 whitespace-nowrap max-w-[300px] truncate border"
-                  >
-                    <span className={row[col.name] === null ? "text-muted-foreground/40 italic" : "text-foreground"}>
-                      {row[col.name] === null ? "NULL" : String(row[col.name])}
-                    </span>
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {rows.length === 0 && (
-          <div className="flex items-center justify-center py-8 text-xs text-muted-foreground">
-            {t('editor.noResults')}
-          </div>
-        )}
-        {/* Sentinel for IntersectionObserver */}
-        <div ref={sentinelRef} className="h-1" />
-        {/* Loading / status indicator */}
-        {isLoadingMore && (
-          <div className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground">
-            <Loader2 size={14} className="animate-spin" />
-            {t('scroll.loadingMore')}
-          </div>
-        )}
+      <div ref={parentRef} className="flex-1 overflow-auto min-h-0">
+        <div style={{ height: `${virtualCount * 28}px`, position: 'relative' }}>
+          <VirtualTableBody
+            rows={rows}
+            columns={columns}
+            parentRef={parentRef}
+            virtualCount={virtualCount}
+            hasMore={hasMore}
+            isLoadingMore={isLoadingMore}
+            onLoadMore={onLoadMore}
+          />
+        </div>
       </div>
       {/* Bottom status bar */}
       <div className="flex items-center px-3 py-1 border-t border-border shrink-0 bg-muted/20 text-[11px] text-muted-foreground">

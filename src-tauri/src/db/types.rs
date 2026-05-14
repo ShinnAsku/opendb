@@ -31,6 +31,31 @@ impl DatabaseType {
             _ => None,
         }
     }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            DatabaseType::PostgreSQL => "postgresql",
+            DatabaseType::MySQL => "mysql",
+            DatabaseType::SQLite => "sqlite",
+            DatabaseType::ClickHouse => "clickhouse",
+            DatabaseType::GaussDB => "gaussdb",
+            DatabaseType::Plugin(_) => "plugin",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "postgresql" => Some(DatabaseType::PostgreSQL),
+            "mysql" => Some(DatabaseType::MySQL),
+            "sqlite" => Some(DatabaseType::SQLite),
+            "clickhouse" => Some(DatabaseType::ClickHouse),
+            "gaussdb" | "opengauss" => Some(DatabaseType::GaussDB),
+            other if other.starts_with("plugin:") => {
+                Some(DatabaseType::Plugin(other[7..].to_string()))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Serialize for DatabaseType {
@@ -160,23 +185,44 @@ pub struct ExecuteResult {
     pub execution_time_ms: u64,
 }
 
-/// Database error types
+/// Database error types with structured error codes for frontend handling
 #[derive(Debug, Error)]
 pub enum DbError {
-    #[error("Connection error: {0}")]
+    #[error("[DB-E001] Connection error: {0}")]
     ConnectionError(String),
 
-    #[error("Query error: {0}")]
+    #[error("[DB-E002] Query error: {0}")]
     QueryError(String),
 
-    #[error("Configuration error: {0}")]
+    #[error("[DB-E003] Configuration error: {0}")]
     ConfigError(String),
 
-    #[error("Not found: {0}")]
+    #[error("[DB-E004] Not found: {0}")]
     NotFound(String),
 
-    #[error("Internal error: {0}")]
+    #[error("[DB-E005] Internal error: {0}")]
     Internal(String),
+
+    #[error("[DB-E006] Timeout: {0}")]
+    Timeout(String),
+
+    #[error("[DB-E007] Permission denied: {0}")]
+    PermissionDenied(String),
+}
+
+impl DbError {
+    /// Machine-readable error code for frontend matching
+    pub fn code(&self) -> &str {
+        match self {
+            DbError::ConnectionError(_) => "DB-E001",
+            DbError::QueryError(_) => "DB-E002",
+            DbError::ConfigError(_) => "DB-E003",
+            DbError::NotFound(_) => "DB-E004",
+            DbError::Internal(_) => "DB-E005",
+            DbError::Timeout(_) => "DB-E006",
+            DbError::PermissionDenied(_) => "DB-E007",
+        }
+    }
 }
 
 impl From<sqlx::Error> for DbError {

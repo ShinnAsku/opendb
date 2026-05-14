@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures::StreamExt;
 use sqlx::{Column, Row, TypeInfo};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -38,7 +39,7 @@ impl SQLiteConnection {
             .create_if_missing(true);
 
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(5)
+            .max_connections(1)
             .idle_timeout(Duration::from_secs(600))
             .max_lifetime(Duration::from_secs(1800))
             .acquire_timeout(Duration::from_secs(10))
@@ -47,6 +48,16 @@ impl SQLiteConnection {
             .map_err(|e| {
                 DbError::ConnectionError(format!("Failed to connect to SQLite: {}", e))
             })?;
+
+        // Enable WAL mode to allow concurrent reads with a single writer
+        sqlx::query("PRAGMA journal_mode=WAL")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("PRAGMA busy_timeout=5000")
+            .execute(&pool)
+            .await
+            .ok();
 
         log::info!("Successfully connected to SQLite");
 
@@ -105,9 +116,9 @@ impl DatabaseConnection for SQLiteConnection {
                 let value = match type_name {
                     "INTEGER" | "INT" | "BIGINT" => {
                         if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else if let Ok(v) = row.try_get::<i64, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else if let Ok(Some(v)) = row.try_get::<Option<String>, _>(col.name()) {
                             serde_json::Value::String(v)
                         } else if let Ok(v) = row.try_get::<String, _>(col.name()) {
@@ -118,9 +129,9 @@ impl DatabaseConnection for SQLiteConnection {
                     }
                     "REAL" | "FLOAT" | "DOUBLE" => {
                         if let Ok(Some(v)) = row.try_get::<Option<f64>, _>(col.name()) {
-                            serde_json::Value::from(v)
+                            serde_json::json!(v)
                         } else if let Ok(v) = row.try_get::<f64, _>(col.name()) {
-                            serde_json::Value::from(v)
+                            serde_json::json!(v)
                         } else if let Ok(Some(v)) = row.try_get::<Option<String>, _>(col.name()) {
                             serde_json::Value::String(v)
                         } else if let Ok(v) = row.try_get::<String, _>(col.name()) {
@@ -361,6 +372,23 @@ impl DatabaseConnection for SQLiteConnection {
         ))
     }
 
+    async fn query_sql_paged(
+        &self,
+        sql: &str,
+        limit: u64,
+        _offset: u64,
+    ) -> Result<(QueryResult, bool), DbError> {
+        // SQL already has LIMIT limit+1 injected — fetch_all is safe (bounded)
+        let result = self.query_sql(sql).await?;
+        let has_more = result.rows.len() as u64 > limit;
+        let rows = if has_more {
+            result.rows.into_iter().take(limit as usize).collect()
+        } else {
+            result.rows
+        };
+        Ok((QueryResult { rows, ..result }, has_more))
+    }
+
     async fn close(&self) {
         self.pool.close().await;
     }
@@ -488,9 +516,11 @@ impl DatabaseConnection for SQLiteConnection {
         updates: &[(String, serde_json::Value)],
         where_clause: &str,
     ) -> Result<ExecuteResult, DbError> {
+        crate::db::trait_def::sanitize_where_clause(where_clause)
+            .map_err(|e| DbError::QueryError(e))?;
         let set_clauses: Vec<String> = updates
             .iter()
-            .map(|(col, val)| format!("{} = {}", col, json_value_to_sql(val)))
+            .map(|(col, val)| format!("{} = {}", sqlite_quote_table(col), json_value_to_sql(val)))
             .collect();
         let sql = format!(
             "UPDATE {} SET {} WHERE {}",
@@ -507,7 +537,7 @@ impl DatabaseConnection for SQLiteConnection {
         _schema: Option<&str>,
         values: &[(String, serde_json::Value)],
     ) -> Result<ExecuteResult, DbError> {
-        let columns: Vec<&str> = values.iter().map(|(c, _)| c.as_str()).collect();
+        let columns: Vec<String> = values.iter().map(|(c, _)| sqlite_quote_table(c)).collect();
         let value_strs: Vec<String> = values.iter().map(|(_, val)| json_value_to_sql(val)).collect();
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
@@ -524,6 +554,8 @@ impl DatabaseConnection for SQLiteConnection {
         _schema: Option<&str>,
         where_clause: &str,
     ) -> Result<ExecuteResult, DbError> {
+        crate::db::trait_def::sanitize_where_clause(where_clause)
+            .map_err(|e| DbError::QueryError(e))?;
         let sql = format!(
             "DELETE FROM {} WHERE {}",
             sqlite_quote_table(table),

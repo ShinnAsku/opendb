@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures::StreamExt;
 use rust_decimal::Decimal;
 use sqlx::{Column, Row, TypeInfo};
 use std::time::{Duration, Instant};
@@ -106,6 +107,14 @@ fn pg_full_table(table: &str, schema: Option<&str>) -> String {
     }
 }
 
+fn pg_full_table_quoted(table: &str, schema: Option<&str>) -> String {
+    let tbl = format!("\"{}\"", table.replace('"', "\"\""));
+    match schema {
+        Some(s) if !s.is_empty() => format!("\"{}\".{}", s.replace('"', "\"\""), tbl),
+        _ => tbl,
+    }
+}
+
 #[async_trait]
 impl DatabaseConnection for PostgresConnection {
     async fn execute_sql(&self, sql: &str) -> Result<ExecuteResult, DbError> {
@@ -161,58 +170,58 @@ impl DatabaseConnection for PostgresConnection {
                     }
                     "INT2" => {
                         if let Ok(Some(v)) = row.try_get::<Option<i16>, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else if let Ok(v) = row.try_get::<i16, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else {
                             serde_json::Value::Null
                         }
                     }
                     "INT4" | "OID" => {
                         if let Ok(Some(v)) = row.try_get::<Option<i32>, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else if let Ok(v) = row.try_get::<i32, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else {
                             serde_json::Value::Null
                         }
                     }
                     "INT8" => {
                         if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else if let Ok(v) = row.try_get::<i64, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else {
                             serde_json::Value::Null
                         }
                     }
                     "FLOAT4" => {
                         if let Ok(Some(v)) = row.try_get::<Option<f32>, _>(col.name()) {
-                            serde_json::Value::from(v as f64)
+                            serde_json::json!(v)
                         } else if let Ok(v) = row.try_get::<f32, _>(col.name()) {
-                            serde_json::Value::from(v as f64)
+                            serde_json::json!(v)
                         } else {
                             serde_json::Value::Null
                         }
                     }
                     "FLOAT8" => {
                         if let Ok(Some(v)) = row.try_get::<Option<f64>, _>(col.name()) {
-                            serde_json::Value::from(v)
+                            serde_json::json!(v)
                         } else if let Ok(v) = row.try_get::<f64, _>(col.name()) {
-                            serde_json::Value::from(v)
+                            serde_json::json!(v)
                         } else {
                             serde_json::Value::Null
                         }
                     }
                     "NUMERIC" | "MONEY" => {
                         if let Ok(Some(v)) = row.try_get::<Option<Decimal>, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else if let Ok(v) = row.try_get::<Decimal, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else if let Ok(v) = row.try_get::<i64, _>(col.name()) {
-                            serde_json::Value::String(v.to_string())
+                            serde_json::json!(v)
                         } else {
                             serde_json::Value::Null
                         }
@@ -1171,10 +1180,14 @@ impl DatabaseConnection for PostgresConnection {
         updates: &[(String, serde_json::Value)],
         where_clause: &str,
     ) -> Result<ExecuteResult, DbError> {
-        let full_table = pg_full_table(table, schema);
+        use crate::db::trait_def::{escape_identifier, sanitize_where_clause};
+        use crate::db::types::DatabaseType;
+        sanitize_where_clause(where_clause)
+            .map_err(|e| DbError::QueryError(e))?;
+        let full_table = pg_full_table_quoted(table, schema);
         let set_clauses: Vec<String> = updates
             .iter()
-            .map(|(col, val)| format!("{} = {}", col, json_value_to_sql(val)))
+            .map(|(col, val)| format!("{} = {}", escape_identifier(col, &DatabaseType::PostgreSQL), json_value_to_sql(val)))
             .collect();
         let sql = format!(
             "UPDATE {} SET {} WHERE {}",
@@ -1191,8 +1204,12 @@ impl DatabaseConnection for PostgresConnection {
         schema: Option<&str>,
         values: &[(String, serde_json::Value)],
     ) -> Result<ExecuteResult, DbError> {
-        let full_table = pg_full_table(table, schema);
-        let columns: Vec<&str> = values.iter().map(|(c, _)| c.as_str()).collect();
+        use crate::db::trait_def::escape_identifier;
+        use crate::db::types::DatabaseType;
+        let full_table = pg_full_table_quoted(table, schema);
+        let columns: Vec<String> = values.iter()
+            .map(|(c, _)| escape_identifier(c, &DatabaseType::PostgreSQL))
+            .collect();
         let value_strs: Vec<String> = values.iter().map(|(_, val)| json_value_to_sql(val)).collect();
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
@@ -1209,9 +1226,29 @@ impl DatabaseConnection for PostgresConnection {
         schema: Option<&str>,
         where_clause: &str,
     ) -> Result<ExecuteResult, DbError> {
-        let full_table = pg_full_table(table, schema);
+        use crate::db::trait_def::sanitize_where_clause;
+        sanitize_where_clause(where_clause)
+            .map_err(|e| DbError::QueryError(e))?;
+        let full_table = pg_full_table_quoted(table, schema);
         let sql = format!("DELETE FROM {} WHERE {}", full_table, where_clause);
         self.execute_sql(&sql).await
+    }
+
+    async fn query_sql_paged(
+        &self,
+        sql: &str,
+        limit: u64,
+        _offset: u64,
+    ) -> Result<(QueryResult, bool), DbError> {
+        // SQL already has LIMIT limit+1 injected — fetch_all is safe (bounded to ~1001 rows)
+        let result = self.query_sql(sql).await?;
+        let has_more = result.rows.len() as u64 > limit;
+        let rows = if has_more {
+            result.rows.into_iter().take(limit as usize).collect()
+        } else {
+            result.rows
+        };
+        Ok((QueryResult { rows, ..result }, has_more))
     }
 }
 
