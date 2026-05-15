@@ -1541,6 +1541,78 @@ function QueryEditor() {
 
 const COL_MIN_WIDTH = 120;
 
+interface TableContextMenuProps {
+  x: number;
+  y: number;
+  selectedCount: number;
+  hasSelection: boolean;
+  canEdit: boolean;
+  onClose: () => void;
+  onCopyRows: () => void;
+  onExportCSV: () => void;
+  onExportJSON: () => void;
+  onExportSQL: () => void;
+  onEditRow: () => void;
+  onDeleteRows: () => void;
+  onGenerateDeleteSQL: () => void;
+}
+
+function TableContextMenu({
+  x, y, selectedCount, hasSelection, canEdit, onClose,
+  onCopyRows, onExportCSV, onExportJSON, onExportSQL,
+  onEditRow, onDeleteRows, onGenerateDeleteSQL,
+}: TableContextMenuProps) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ x, y });
+
+  useEffect(() => {
+    if (menuRef.current) {
+      const rect = menuRef.current.getBoundingClientRect();
+      let ax = x, ay = y;
+      if (x + rect.width > window.innerWidth) ax = window.innerWidth - rect.width - 4;
+      if (y + rect.height > window.innerHeight) ay = window.innerHeight - rect.height - 4;
+      setPos({ x: ax, y: ay });
+    }
+  }, [x, y]);
+
+  const item = (label: string, onClick: () => void, icon: React.ReactNode, disabled?: boolean, destructive?: boolean) => (
+    <button
+      onClick={() => { if (!disabled) { onClick(); onClose(); } }}
+      disabled={disabled}
+      className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors disabled:opacity-40 disabled:cursor-default ${
+        destructive ? 'text-red-400 hover:bg-red-500/10' : 'hover:bg-muted'
+      }`}
+    >
+      <span className="w-4 flex items-center justify-center">{icon}</span>
+      <span className="flex-1 text-left">{label}</span>
+      {selectedCount > 0 && (
+        <span className="text-[10px] text-muted-foreground ml-2">{selectedCount}</span>
+      )}
+    </button>
+  );
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
+      <div
+        ref={menuRef}
+        className="fixed z-50 border border-border rounded-md shadow-lg py-1 min-w-[200px]"
+        style={{ left: pos.x, top: pos.y, backgroundColor: 'hsl(var(--popover))', color: 'hsl(var(--popover-foreground))' }}
+      >
+        {item(t('table.copyRows'), onCopyRows, <Copy size={12} />, !hasSelection)}
+        <div className="border-t border-border my-1" />
+        {item(t('table.exportCSV'), onExportCSV, <Database size={12} />, !hasSelection)}
+        {item(t('table.exportJSON'), onExportJSON, <Code2 size={12} />, !hasSelection)}
+        {item(t('table.exportSQL'), onExportSQL, <Database size={12} />, !hasSelection)}
+        <div className="border-t border-border my-1" />
+        {item(t('table.editRow'), onEditRow, <TextCursorInput size={12} />, !canEdit || selectedCount !== 1)}
+        {item(t('table.generateDeleteSQL'), onGenerateDeleteSQL, <Code2 size={12} />, !canEdit || !hasSelection)}
+        {item(t('table.deleteRows'), onDeleteRows, <XCircle size={12} />, !canEdit || !hasSelection, true)}
+      </div>
+    </>
+  );
+}
+
 function VirtualTableBody({
   rows, columns, virtualCount, hasMore, isLoadingMore, onLoadMore,
   onSelectionChange,
@@ -1561,6 +1633,7 @@ function VirtualTableBody({
   const [modifiedCells, setModifiedCells] = useState<Map<string, any>>(new Map());
   const editInputRef = useRef<HTMLInputElement>(null);
   const suppressBlurRef = useRef(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   // Auto-focus and select input when editing starts
   useEffect(() => {
@@ -1601,6 +1674,16 @@ function VirtualTableBody({
   useEffect(() => {
     onSelectionChange?.(Array.from(selectedRows));
   }, [selectedRows, onSelectionChange]);
+
+  // Close context menu on Escape key
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setContextMenu(null);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [contextMenu]);
 
   const toggleRow = useCallback((idx: number, ctrl: boolean, shift: boolean) => {
     setSelectedRows((prev) => {
@@ -1691,7 +1774,11 @@ function VirtualTableBody({
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault();
-                  // Context menu will be added in later tasks
+                  if (!selectedRows.has(rowIdx)) {
+                    setSelectedRows(new Set([rowIdx]));
+                    setLastClickedIdx(rowIdx);
+                  }
+                  setContextMenu({ x: e.clientX, y: e.clientY });
                 }}
               >
                 <td
@@ -1819,6 +1906,65 @@ function VirtualTableBody({
           )}
         </tbody>
       </table>
+      {contextMenu && (
+        <TableContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          selectedCount={selectedRows.size}
+          hasSelection={selectedRows.size > 0}
+          canEdit={onSelectionChange != null}
+          onClose={() => setContextMenu(null)}
+          onCopyRows={() => {
+            const selectedData = Array.from(selectedRows)
+              .filter(i => i < rows.length)
+              .sort((a, b) => a - b)
+              .map(i => rows[i]);
+            const text = selectedData.map(row =>
+              columns.map((c: any) => String(row[c.name] ?? '')).join('\t')
+            ).join('\n');
+            navigator.clipboard.writeText(text);
+          }}
+          onExportCSV={() => {
+            const selectedData = Array.from(selectedRows)
+              .filter(i => i < rows.length)
+              .sort((a, b) => a - b)
+              .map(i => rows[i]);
+            const csv = exportToCSV(columns, selectedData);
+            downloadFile(csv, 'selected_export.csv', 'text/csv');
+          }}
+          onExportJSON={() => {
+            const selectedData = Array.from(selectedRows)
+              .filter(i => i < rows.length)
+              .sort((a, b) => a - b)
+              .map(i => rows[i]);
+            const json = exportToJSON(columns, selectedData);
+            downloadFile(json, 'selected_export.json', 'application/json');
+          }}
+          onExportSQL={() => {
+            const selectedData = Array.from(selectedRows)
+              .filter(i => i < rows.length)
+              .sort((a, b) => a - b)
+              .map(i => rows[i]);
+            const sql = exportToSQL(columns, selectedData, 'selected_data');
+            downloadFile(sql, 'selected_export.sql', 'text/plain');
+          }}
+          onEditRow={() => {
+            const idx = Array.from(selectedRows).sort((a, b) => a - b)[0];
+            if (idx !== undefined && idx < rows.length && columns.length > 0) {
+              const col = columns[0];
+              const val = rows[idx][col.name];
+              setEditValue(val === null ? '' : String(val));
+              setEditingCell({ rowIdx: idx, colName: col.name });
+            }
+          }}
+          onDeleteRows={() => {
+            // Will be wired in Task 5
+          }}
+          onGenerateDeleteSQL={() => {
+            // Will be wired in Task 5
+          }}
+        />
+      )}
     </div>
   );
 }
