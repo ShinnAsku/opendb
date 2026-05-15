@@ -1557,6 +1557,12 @@ function VirtualTableBody({
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [lastClickedIdx, setLastClickedIdx] = useState<number | null>(null);
 
+  // Reset selection when result set changes
+  useEffect(() => {
+    setSelectedRows(new Set());
+    setLastClickedIdx(null);
+  }, [rows]);
+
   const virtualizer = useVirtualizer({
     count: virtualCount,
     getScrollElement: () => scrollRef.current,
