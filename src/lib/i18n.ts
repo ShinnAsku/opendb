@@ -351,6 +351,8 @@ const translations: Record<Language, Record<string, string>> = {
     'scroll.loadingMore': '加载更多中...',
     'scroll.allLoaded': '已加载全部 {count} 行',
     'scroll.rowsLoaded': '已加载 {count} 行',
+    'scroll.scrollForMore': '滚动加载更多',
+    'scroll.rowLimitReached': '已达到显示上限，请用导出功能获取完整数据',
 
     // ===== Table Designer =====
     'designer.createTable': '新建表',
@@ -448,6 +450,23 @@ const translations: Record<Language, Record<string, string>> = {
     'sidebar.duplicateFailed': '复制表失败',
     'toolbar.tableDesigner': '表设计',
     'toolbar.tableDesignerShort': '建表',
+
+    // ===== Table row operations =====
+    'table.copyRows': '复制行',
+    'table.exportCSV': '导出选中为CSV',
+    'table.exportJSON': '导出选中为JSON',
+    'table.exportSQL': '导出选中为SQL',
+    'table.editRow': '编辑行',
+    'table.deleteRows': '删除选中行',
+    'table.deleteConfirm': '确认删除 {count} 行数据？',
+    'table.generateDeleteSQL': '生成DELETE语句',
+    'table.applyChanges': '应用修改',
+    'table.applyChangesTip': '{count} 行已修改',
+    'table.changesApplied': '修改已应用',
+    'table.deleteSuccess': '已删除 {count} 行',
+    'table.changesPending': '{count} 个单元格已修改 — 点击"应用修改"保存',
+    'table.discardChanges': '放弃修改',
+    'table.editing': '编辑中',
 
     // ===== MainLayout =====
     'layout.saved': '已保存',
@@ -1039,6 +1058,8 @@ const translations: Record<Language, Record<string, string>> = {
     'scroll.loadingMore': 'Loading more...',
     'scroll.allLoaded': 'All {count} rows loaded',
     'scroll.rowsLoaded': '{count} rows loaded',
+    'scroll.scrollForMore': 'Scroll for more',
+    'scroll.rowLimitReached': 'Display limit reached, use Export for full data',
 
     // ===== Table Designer =====
     'designer.createTable': 'Create Table',
@@ -1133,6 +1154,23 @@ const translations: Record<Language, Record<string, string>> = {
     'sidebar.duplicateFailed': 'Failed to duplicate table',
     'toolbar.tableDesigner': 'Table Designer',
     'toolbar.tableDesignerShort': 'Design',
+
+    // ===== Table row operations =====
+    'table.copyRows': 'Copy Row(s)',
+    'table.exportCSV': 'Export Selected as CSV',
+    'table.exportJSON': 'Export Selected as JSON',
+    'table.exportSQL': 'Export Selected as SQL',
+    'table.editRow': 'Edit Row',
+    'table.deleteRows': 'Delete Row(s)',
+    'table.deleteConfirm': 'Are you sure you want to delete {count} row(s)?',
+    'table.generateDeleteSQL': 'Generate DELETE SQL',
+    'table.applyChanges': 'Apply Changes',
+    'table.applyChangesTip': '{count} row(s) modified',
+    'table.changesApplied': 'Changes applied successfully',
+    'table.deleteSuccess': '{count} row(s) deleted successfully',
+    'table.changesPending': '{count} cell(s) modified — click Apply Changes to save',
+    'table.discardChanges': 'Discard Changes',
+    'table.editing': 'Editing',
 
     // ===== MainLayout =====
     'layout.saved': 'Saved',
