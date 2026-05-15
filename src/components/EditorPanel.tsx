@@ -1560,6 +1560,7 @@ function VirtualTableBody({
   const [editValue, setEditValue] = useState('');
   const [modifiedCells, setModifiedCells] = useState<Map<string, any>>(new Map());
   const editInputRef = useRef<HTMLInputElement>(null);
+  const suppressBlurRef = useRef(false);
 
   // Auto-focus and select input when editing starts
   useEffect(() => {
@@ -1569,10 +1570,13 @@ function VirtualTableBody({
     }
   }, [editingCell]);
 
-  // Reset selection when result set changes
+  // Reset selection and edit state when result set changes
   useEffect(() => {
     setSelectedRows(new Set());
     setLastClickedIdx(null);
+    setModifiedCells(new Map());
+    setEditingCell(null);
+    setEditValue('');
   }, [rows]);
 
   const virtualizer = useVirtualizer({
@@ -1726,9 +1730,11 @@ function VirtualTableBody({
                                   return next;
                                 });
                               }
+                              suppressBlurRef.current = true;
                               setEditingCell(null);
                             } else if (e.key === 'Escape') {
                               e.preventDefault();
+                              suppressBlurRef.current = true;
                               setEditingCell(null);
                             } else if (e.key === 'Tab') {
                               e.preventDefault();
@@ -1762,6 +1768,11 @@ function VirtualTableBody({
                             }
                           }}
                           onBlur={() => {
+                            if (suppressBlurRef.current) {
+                              suppressBlurRef.current = false;
+                              setEditingCell(null);
+                              return;
+                            }
                             const originalVal = row[col.name];
                             if (editValue !== String(originalVal ?? '')) {
                               setModifiedCells((prev) => {
